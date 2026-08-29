@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  background-color: #0B0F19;
+  color: #F8FAFC;
+  font-family: 'Inter', system-ui, sans-serif;
+  overflow-x: hidden;
+}
+
+/* Custom scrollbars for dark premium layout */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0F19;
+}
+::-webkit-scrollbar-thumb {
+  background: #24334C;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3B82F6;
+}

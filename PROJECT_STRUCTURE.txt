@@ -1,0 +1,141 @@
+AI-Powered-Smart-CCTV-Investigation-System-Team-Handover/
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   │   └── v1/
+│   │   │       ├── auth.py
+│   │   │       ├── cameras.py
+│   │   │       ├── events.py
+│   │   │       ├── health.py
+│   │   │       ├── import_students.py
+│   │   │       ├── investigations.py
+│   │   │       ├── notifications.py
+│   │   │       ├── reports.py
+│   │   │       ├── search.py
+│   │   │       ├── students.py
+│   │   │       └── videos.py
+│   │   ├── core/
+│   │   │   ├── config.py
+│   │   │   ├── exceptions.py
+│   │   │   ├── model_manager.py
+│   │   │   └── security.py
+│   │   ├── db/
+│   │   │   ├── migrations/
+│   │   │   │   └── env.py
+│   │   │   ├── base_class.py
+│   │   │   └── session.py
+│   │   ├── event_engine/
+│   │   │   ├── event_dispatcher.py
+│   │   │   ├── event_engine.py
+│   │   │   ├── event_types.py
+│   │   │   ├── trajectory_analyzer.py
+│   │   │   └── zone_analyzer.py
+│   │   ├── models/
+│   │   │   ├── bulk_import.py
+│   │   │   ├── camera.py
+│   │   │   ├── event.py
+│   │   │   ├── face_embedding.py
+│   │   │   ├── notification.py
+│   │   │   ├── recognition.py
+│   │   │   ├── report.py
+│   │   │   ├── student.py
+│   │   │   ├── track.py
+│   │   │   ├── user.py
+│   │   │   └── video.py
+│   │   ├── pipeline/
+│   │   │   ├── detector.py
+│   │   │   ├── embedder.py
+│   │   │   ├── face_engine.py
+│   │   │   ├── frame_processor.py
+│   │   │   ├── orchestrator.py
+│   │   │   ├── reid.py
+│   │   │   ├── tracker.py
+│   │   │   └── video_reader.py
+│   │   ├── schemas/
+│   │   │   ├── auth.py
+│   │   │   ├── camera.py
+│   │   │   ├── event.py
+│   │   │   ├── investigation.py
+│   │   │   ├── notification.py
+│   │   │   ├── recognition.py
+│   │   │   ├── report.py
+│   │   │   ├── search.py
+│   │   │   ├── student.py
+│   │   │   ├── track.py
+│   │   │   ├── user.py
+│   │   │   └── video.py
+│   │   ├── services/
+│   │   │   ├── alert_dispatcher.py
+│   │   │   ├── explanation_engine.py
+│   │   │   ├── hybrid_retrieval.py
+│   │   │   ├── notification_service.py
+│   │   │   ├── query_parser.py
+│   │   │   ├── ranking.py
+│   │   │   ├── student_identifier.py
+│   │   │   ├── vector_store.py
+│   │   │   └── video_metadata.py
+│   │   ├── tasks/
+│   │   │   ├── bulk_tasks.py
+│   │   │   ├── cel_app.py
+│   │   │   ├── cpu_tasks.py
+│   │   │   └── video_tasks.py
+│   │   └── main.py
+│   ├── .env.example
+│   ├── alembic.ini
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── setup_env.ps1
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── DetectionCard.tsx
+│   │   │   ├── Navbar.tsx
+│   │   │   ├── NotificationPanel.tsx
+│   │   │   ├── ProcessingStatus.tsx
+│   │   │   ├── SearchBar.tsx
+│   │   │   ├── Sidebar.tsx
+│   │   │   ├── StudentCard.tsx
+│   │   │   ├── Timeline.tsx
+│   │   │   ├── VideoPlayer.tsx
+│   │   │   └── VirtualZoneEditor.tsx
+│   │   ├── pages/
+│   │   │   ├── BulkImport.tsx
+│   │   │   ├── CameraDetails.tsx
+│   │   │   ├── Cameras.tsx
+│   │   │   ├── Dashboard.tsx
+│   │   │   ├── EventDetails.tsx
+│   │   │   ├── Events.tsx
+│   │   │   ├── Login.tsx
+│   │   │   ├── ReportDetails.tsx
+│   │   │   ├── Reports.tsx
+│   │   │   ├── Search.tsx
+│   │   │   ├── Settings.tsx
+│   │   │   ├── StudentDetails.tsx
+│   │   │   ├── Students.tsx
+│   │   │   ├── TimelinePage.tsx
+│   │   │   ├── Upload.tsx
+│   │   │   └── Videos.tsx
+│   │   ├── services/
+│   │   │   └── api.ts
+│   │   ├── store/
+│   │   │   └── useAuthStore.ts
+│   │   ├── App.tsx
+│   │   ├── index.css
+│   │   └── main.tsx
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── postcss.config.js
+│   ├── tailwind.config.js
+│   ├── tsconfig.json
+│   └── vite.config.ts
+├── docker-compose.yml
+├── QUICK_START.md
+├── README.md
+├── SETUP_GUIDE.md
+├── RUN_PROJECT.md
+├── MODEL_SETUP.md
+├── TROUBLESHOOTING.md
+├── PROJECT_HANDOVER.md
+├── TESTING_GUIDE.md
+└── PROJECT_STRUCTURE.txt
