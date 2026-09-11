@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Home, Video, UploadCloud, Users, Search, Settings, Camera, ShieldAlert, FileText } from 'lucide-react';
+import { Home, Video, UploadCloud, Users, Search, Settings, Camera, ShieldAlert, FileText, Swords } from 'lucide-react';
 
 export const Sidebar: React.FC = () => {
   const menuItems = [
@@ -8,6 +8,7 @@ export const Sidebar: React.FC = () => {
     { name: 'Surveillance Feeds', path: '/videos', icon: Video },
     { name: 'Camera Management', path: '/cameras', icon: Camera },
     { name: 'Security Alerts', path: '/events', icon: ShieldAlert },
+    { name: 'Violence Detection', path: '/violence', icon: Swords },
     { name: 'Forensic Reports', path: '/reports', icon: FileText },
     { name: 'Upload Feed', path: '/upload', icon: UploadCloud },
     { name: 'Student Directory', path: '/students', icon: Users },

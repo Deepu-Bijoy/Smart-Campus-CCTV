@@ -2,7 +2,7 @@ import React from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
-import { ShieldAlert, ArrowLeft, Video, User, AlertCircle, Eye, Calendar, MapPin, CheckCircle2 } from 'lucide-react';
+import { ShieldAlert, ArrowLeft, Video, User, AlertCircle, Eye, Swords, Users } from 'lucide-react';
 
 export const EventDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -35,7 +35,9 @@ export const EventDetails: React.FC = () => {
     );
   }
 
-  const eventTypeLabel = event?.event_type?.replace(/_/g, ' ') || 'Security Alert';
+  const isViolence = event?.event_type?.toUpperCase().includes('VIOLENCE') || event?.event_type?.toUpperCase().includes('FIGHT');
+  const eventTypeLabel = isViolence ? '⚠ Violence Detected' : (event?.event_type?.replace(/_/g, ' ') || 'Security Alert');
+  const identifiedCount = event?.persons_identified_count ?? (event?.students?.length || (event?.student_name ? 1 : 0));
 
   return (
     <div className="space-y-8 py-2">
@@ -49,24 +51,30 @@ export const EventDetails: React.FC = () => {
         </button>
       </div>
 
-      <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md flex items-center justify-between">
+      <div className={`border rounded-2xl p-6 shadow-md flex items-center justify-between ${
+        isViolence ? 'bg-red-950/20 border-red-500/30' : 'bg-dark-card border-dark-border'
+      }`}>
         <div className="flex items-center space-x-5">
-          <div className="bg-red-500/10 p-4 rounded-xl border border-red-500/20">
-            <ShieldAlert className="h-8 w-8 text-red-500" />
+          <div className={`p-4 rounded-xl border ${
+            isViolence ? 'bg-red-500/20 border-red-500/40 text-red-400' : 'bg-red-500/10 border-red-500/20 text-red-500'
+          }`}>
+            {isViolence ? <Swords className="h-8 w-8" /> : <ShieldAlert className="h-8 w-8" />}
           </div>
           <div>
-            <h2 className="text-2xl font-bold text-slate-100 uppercase tracking-wide">
-              {eventTypeLabel} Alert
+            <h2 className="text-2xl font-bold text-slate-100 uppercase tracking-wide flex items-center gap-2">
+              {eventTypeLabel}
             </h2>
             <p className="text-slate-400 text-xs mt-0.5 font-mono">Alert Incident UUID: {event?.id}</p>
           </div>
         </div>
         <span className={`text-xs font-bold px-3 py-1 rounded-full border uppercase font-mono ${
-          event?.confidence === 'high'
-            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-            : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+          isViolence 
+            ? 'bg-red-500/20 text-red-300 border-red-500/30'
+            : event?.confidence === 'high'
+              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+              : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
         }`}>
-          {event?.confidence_score ? `${(event.confidence_score * 100).toFixed(0)}% Confidence` : `${event?.confidence} Confidence`}
+          {event?.confidence_score ? `${(event.confidence_score * 100).toFixed(0)}% Confidence` : `${event?.confidence || 'High'} Confidence`}
         </span>
       </div>
 
@@ -143,6 +151,13 @@ export const EventDetails: React.FC = () => {
                 <span className="text-slate-500">Date & Time</span>
                 <span className="font-semibold text-slate-200 font-mono text-xs">
                   {event && new Date(event.timestamp).toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between py-2">
+                <span className="text-slate-500">Persons Identified</span>
+                <span className="font-semibold text-emerald-400 font-mono text-xs flex items-center gap-1">
+                  <Users className="h-3.5 w-3.5" />
+                  {identifiedCount}
                 </span>
               </div>
               <div className="flex justify-between py-2 last:pb-0">

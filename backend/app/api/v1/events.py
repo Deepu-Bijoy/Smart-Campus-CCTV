@@ -93,7 +93,8 @@ async def _map_incident_to_event_response(db: AsyncSession, inc: Incident) -> Ev
         explanation=inc.explanation,
         evidence_image=screenshot_url,
         evidence_video=video_url,
-        tracks=[]
+        tracks=[],
+        persons_identified_count=len(students_list)
     )
 
 @router.get("", response_model=List[EventResponse])
@@ -158,7 +159,8 @@ async def list_events(
                 confidence=ev.confidence,
                 confidence_score=0.95 if ev.confidence == "high" else 0.70,
                 explanation=f"Surveillance alert trigger of type {ev.event_type}.",
-                tracks=[]
+                tracks=[],
+                persons_identified_count=1 if std_name else 0
             )
         )
 
@@ -184,7 +186,7 @@ async def list_event_types(
     """
     Get all supported alert category labels.
     """
-    return [e.value for e in EventType] + ["FIGHT", "SUSPICIOUS", "RESTRICTED_ENTRY", "BOUNDARY_CROSSING"]
+    return [e.value for e in EventType] + ["VIOLENCE", "FIGHT", "SUSPICIOUS", "RESTRICTED_ENTRY", "BOUNDARY_CROSSING"]
 
 @router.get("/video/{video_id}", response_model=List[EventResponse])
 async def list_video_events(
@@ -259,7 +261,8 @@ async def get_event(
             confidence=event_obj.confidence,
             confidence_score=0.95 if event_obj.confidence == "high" else 0.70,
             explanation=f"Surveillance alert trigger of type {event_obj.event_type}.",
-            tracks=[]
+            tracks=[],
+            persons_identified_count=1 if std_name else 0
         )
 
     raise HTTPException(

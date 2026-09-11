@@ -14,7 +14,7 @@ from app.models.track import Track, PersonReid
 from app.models.recognition import StudentRecognitionEvent
 from app.models.incident import Incident, IncidentPerson, Evidence, DetectedEvent
 from app.event_engine.zone_analyzer import ZoneAnalyzer
-from app.services.clip_generator import generate_subclip
+from app.services.clip_generator import generate_subclip, extract_evidence_frame
 from app.services.vector_store import QdrantVectorStore
 from app.pipeline.embedder import CLIPEmbedder
 
@@ -297,7 +297,7 @@ class EventDetectionEngine:
                             )
                             db.add(inc_person)
 
-                        # Generate Evidence (Screenshot frame and Video clip)
+                        # Generate Evidence (Representative screenshot frame and video clip)
                         reid_stmt = (
                             select(PersonReid)
                             .filter(PersonReid.track_id == track.id)
@@ -305,16 +305,21 @@ class EventDetectionEngine:
                         )
                         reid_res = await db.execute(reid_stmt)
                         reid_obj = reid_res.scalars().first()
-                        screenshot_path = reid_obj.crop_path if reid_obj else video.file_path
                         
-                        ev_screen = Evidence(
-                            id=uuid.uuid4(),
-                            incident_id=incident_id,
-                            evidence_type="screenshot",
-                            file_path=screenshot_path,
-                            timestamp=incident_time
-                        )
-                        db.add(ev_screen)
+                        frame_filename = f"evidence_frame_{incident_id.hex}.jpg"
+                        frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
+                        frame_success = extract_evidence_frame(video.file_path, t_sec, frame_path)
+                        screenshot_path = frame_path if frame_success else (reid_obj.crop_path if reid_obj and reid_obj.crop_path and os.path.exists(reid_obj.crop_path) else None)
+                        
+                        if screenshot_path:
+                            ev_screen = Evidence(
+                                id=uuid.uuid4(),
+                                incident_id=incident_id,
+                                evidence_type="screenshot",
+                                file_path=screenshot_path,
+                                timestamp=incident_time
+                            )
+                            db.add(ev_screen)
 
                         # Cut H.264 Video Sub-clip
                         clip_filename = f"clip_{incident_id.hex}.mp4"
@@ -405,6 +410,7 @@ class EventDetectionEngine:
                 db.add(det_event)
 
                 # Resolve all involved students for tracks in this video around timestamp
+                persons_identified_count = 0
                 for trk in tracks:
                     rec_stmt = (
                         select(StudentRecognitionEvent)
@@ -429,17 +435,22 @@ class EventDetectionEngine:
                                 confidence=rec_event.similarity_score
                             )
                             db.add(inc_person)
+                            persons_identified_count += 1
 
-                # Generate Evidence
-                screenshot_path = payload.get("crop_path", video.file_path)
-                ev_screen = Evidence(
-                    id=uuid.uuid4(),
-                    incident_id=incident_id,
-                    evidence_type="screenshot",
-                    file_path=screenshot_path,
-                    timestamp=incident_time
-                )
-                db.add(ev_screen)
+                # Generate Evidence (Representative screenshot frame and video clip)
+                frame_filename = f"evidence_frame_{incident_id.hex}.jpg"
+                frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
+                frame_success = extract_evidence_frame(video.file_path, t_sec, frame_path)
+                screenshot_path = frame_path if frame_success else (payload.get("crop_path") if payload.get("crop_path") and os.path.exists(payload.get("crop_path")) else None)
+                if screenshot_path:
+                    ev_screen = Evidence(
+                        id=uuid.uuid4(),
+                        incident_id=incident_id,
+                        evidence_type="screenshot",
+                        file_path=screenshot_path,
+                        timestamp=incident_time
+                    )
+                    db.add(ev_screen)
 
                 # Cut H.264 Video Sub-clip
                 clip_filename = f"clip_{incident_id.hex}.mp4"
@@ -456,6 +467,19 @@ class EventDetectionEngine:
                     db.add(ev_video)
 
                 incidents_created += 1
+
+                # Dispatch real-time security alert for detected fight / violence
+                try:
+                    from app.services.alert_dispatcher import AlertDispatcher
+                    await AlertDispatcher.dispatch_alert(
+                        db=db,
+                        event_type="VIOLENCE",
+                        camera_name=camera_name,
+                        confidence="high",
+                        persons_identified_count=persons_identified_count
+                    )
+                except Exception as ex:
+                    logger.warning(f"Could not dispatch violence alert notification: {ex}")
 
             # 2. Suspicious Activity Semantic Checks
             susp_matches = vector_store.search_by_text(

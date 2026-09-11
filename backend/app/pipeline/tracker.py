@@ -15,13 +15,25 @@ class ByteTrackTracker:
         Tracks objects in a single frame using ByteTrack. Maintains IDs over time.
         """
         tracker_cfg = CUSTOM_TRACKER_CONFIG if os.path.exists(CUSTOM_TRACKER_CONFIG) else "bytetrack.yaml"
-        results = detector.model.track(
-            frame,
-            persist=persist,
-            tracker=tracker_cfg,
-            conf=0.25,
-            classes=detector.target_classes,
-            device=detector.device,
-            verbose=False
-        )
+        try:
+            results = detector.model.track(
+                frame,
+                persist=persist,
+                tracker=tracker_cfg,
+                conf=0.25,
+                classes=detector.target_classes,
+                device=detector.device,
+                verbose=False
+            )
+        except Exception as te:
+            logger.warning(f"Tracker with {tracker_cfg} failed ({te}). Falling back to default bytetrack.yaml")
+            results = detector.model.track(
+                frame,
+                persist=persist,
+                tracker="bytetrack.yaml",
+                conf=0.25,
+                classes=detector.target_classes,
+                device=detector.device,
+                verbose=False
+            )
         return results[0] if results else None

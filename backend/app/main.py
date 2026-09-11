@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.exceptions import setup_exception_handlers
 from app.tasks.cel_app import celery_app
-from app.api.v1 import auth, videos, health, search, students, investigations, cameras, events, reports, notifications, import_students
+from app.api.v1 import auth, videos, health, search, students, investigations, cameras, events, reports, notifications, import_students, violence
  
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -295,6 +295,7 @@ app.include_router(events.router, prefix=f"{settings.API_V1_STR}/events", tags=[
 app.include_router(reports.router, prefix=f"{settings.API_V1_STR}/reports", tags=["Reports"])
 app.include_router(notifications.router, prefix=f"{settings.API_V1_STR}/notifications", tags=["Notifications"])
 app.include_router(investigations.router, prefix=f"{settings.API_V1_STR}", tags=["Investigations"])
+app.include_router(violence.router, prefix=f"{settings.API_V1_STR}/violence", tags=["Violence Detection"])
 
 from fastapi.staticfiles import StaticFiles
 app.mount("/storage", StaticFiles(directory=settings.STORAGE_DIR), name="storage")

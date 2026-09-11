@@ -5,14 +5,11 @@ import {
   ShieldAlert, 
   Calendar, 
   Eye, 
-  Activity, 
-  AlertCircle, 
   Video, 
   User, 
+  Users,
   X, 
   ExternalLink,
-  Filter,
-  CheckCircle2,
   AlertTriangle,
   Swords,
   Footprints,
@@ -40,7 +37,7 @@ export const Events: React.FC = () => {
     if (selectedFilter === 'ALL') return events;
     return events.filter((ev: any) => {
       const type = (ev.event_type || '').toUpperCase();
-      if (selectedFilter === 'FIGHT') return type.includes('FIGHT');
+      if (selectedFilter === 'FIGHT') return type.includes('FIGHT') || type.includes('VIOLENCE');
       if (selectedFilter === 'BOUNDARY') return type.includes('FENCE') || type.includes('BOUNDARY') || type.includes('JUMP');
       if (selectedFilter === 'RESTRICTED') return type.includes('RESTRICTED') || type.includes('ENTRY');
       if (selectedFilter === 'SUSPICIOUS') return type.includes('SUSPICIOUS') || type.includes('ANOMALY');
@@ -50,11 +47,11 @@ export const Events: React.FC = () => {
 
   const getEventBadgeClass = (typeStr: string) => {
     const type = (typeStr || '').toUpperCase();
-    if (type.includes('FIGHT')) {
+    if (type.includes('VIOLENCE') || type.includes('FIGHT')) {
       return {
         badge: 'bg-red-500/10 text-red-400 border-red-500/30',
         icon: <Swords className="h-4 w-4 text-red-500" />,
-        label: 'Fight / Altercation'
+        label: '⚠ Violence Detected'
       };
     } else if (type.includes('FENCE') || type.includes('BOUNDARY') || type.includes('JUMP')) {
       return {
@@ -105,7 +102,7 @@ export const Events: React.FC = () => {
       <div className="flex flex-wrap gap-2 bg-slate-900/40 p-2 rounded-2xl border border-dark-border">
         {[
           { id: 'ALL', label: 'All Alerts', icon: <ShieldAlert className="h-3.5 w-3.5" /> },
-          { id: 'FIGHT', label: 'Fights & Altercations', icon: <Swords className="h-3.5 w-3.5 text-red-400" /> },
+          { id: 'FIGHT', label: 'Violence & Altercations', icon: <Swords className="h-3.5 w-3.5 text-red-400" /> },
           { id: 'BOUNDARY', label: 'Fence Jumps & Boundary', icon: <Footprints className="h-3.5 w-3.5 text-amber-400" /> },
           { id: 'RESTRICTED', label: 'Restricted Area Entries', icon: <Lock className="h-3.5 w-3.5 text-purple-400" /> },
           { id: 'SUSPICIOUS', label: 'Suspicious Activities', icon: <AlertTriangle className="h-3.5 w-3.5 text-yellow-400" /> },
@@ -158,7 +155,7 @@ export const Events: React.FC = () => {
                               {badgeInfo.label}
                             </span>
                             <span className="font-semibold text-slate-200 block text-xs">
-                              {ev.camera_name || 'Camera Source'} {ev.camera_location ? `(${ev.camera_location})` : ''}
+                              Camera: {ev.camera_name || 'Camera Source'} {ev.camera_location ? `(${ev.camera_location})` : ''}
                             </span>
                           </div>
                         </div>
@@ -168,7 +165,7 @@ export const Events: React.FC = () => {
                       <td className="px-6 py-4 text-xs font-mono text-slate-400 whitespace-nowrap">
                         <span className="flex items-center space-x-1.5">
                           <Calendar className="h-3.5 w-3.5 text-slate-500" />
-                          <span>{new Date(ev.timestamp).toLocaleString()}</span>
+                          <span>Time: {new Date(ev.timestamp).toLocaleString()}</span>
                         </span>
                       </td>
 
@@ -183,34 +180,29 @@ export const Events: React.FC = () => {
                         </span>
                       </td>
 
-                      {/* Target Identity */}
+                      {/* Target Identity & Persons Identified Count */}
                       <td className="px-6 py-4">
-                        {ev.students && ev.students.length > 0 ? (
-                          <div className="space-y-1">
-                            <div className="flex items-center space-x-1.5 text-xs text-emerald-400 font-semibold">
-                              <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                              <span>{ev.students.map((s: any) => s.name).join(', ')}</span>
-                            </div>
-                            <span className="text-[10px] text-slate-500 font-mono block">
-                              Roll: {ev.students.map((s: any) => s.roll_number).join(', ')} (Directory Matched)
+                        <div className="space-y-1">
+                          <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-200">
+                            <Users className="h-3.5 w-3.5 text-blue-400" />
+                            <span>
+                              Persons identified: {ev.persons_identified_count ?? (ev.students && ev.students.length > 0 ? ev.students.length : (ev.student_name ? 1 : 0))}
                             </span>
                           </div>
-                        ) : ev.student_name ? (
-                          <div className="space-y-1">
-                            <div className="flex items-center space-x-1.5 text-xs text-emerald-400 font-semibold">
-                              <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                              <span>{ev.student_name}</span>
+                          {ev.students && ev.students.length > 0 ? (
+                            <div className="text-[11px] text-emerald-400 font-medium truncate max-w-xs">
+                              {ev.students.map((s: any) => s.name).join(', ')}
                             </div>
-                            <span className="text-[10px] text-slate-500 font-mono block">
-                              Roll: {ev.student_roll || 'N/A'} (Directory Matched)
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="flex items-center space-x-1.5 text-xs text-slate-500">
-                            <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 text-slate-500" />
-                            <span>Unknown Target Profile</span>
-                          </div>
-                        )}
+                          ) : ev.student_name ? (
+                            <div className="text-[11px] text-emerald-400 font-medium">
+                              {ev.student_name}
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-slate-500 italic">
+                              Unidentified
+                            </div>
+                          )}
+                        </div>
                       </td>
 
                       {/* Actions */}
@@ -218,10 +210,10 @@ export const Events: React.FC = () => {
                         <div className="flex items-center justify-end space-x-2">
                           <button
                             onClick={() => setActiveModalAlert(ev)}
-                            className="inline-flex items-center space-x-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl shadow-md shadow-blue-500/20 transition cursor-pointer"
+                            className="inline-flex items-center space-x-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl shadow-md shadow-blue-500/20 transition cursor-pointer"
                           >
                             <Eye className="h-3.5 w-3.5" />
-                            <span>Analyze Alert</span>
+                            <span>[View Evidence]</span>
                           </button>
                           <Link
                             to={`/events/${ev.id}`}
@@ -262,20 +254,43 @@ export const Events: React.FC = () => {
             {/* Modal Header */}
             <div className="flex items-center space-x-4 border-b border-dark-border pb-4">
               <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
-                <ShieldAlert className="h-6 w-6 text-red-500" />
+                {activeModalAlert.event_type?.toUpperCase().includes('VIOLENCE') || activeModalAlert.event_type?.toUpperCase().includes('FIGHT') ? (
+                  <Swords className="h-6 w-6 text-red-500" />
+                ) : (
+                  <ShieldAlert className="h-6 w-6 text-red-500" />
+                )}
               </div>
-              <div>
+              <div className="flex-1">
                 <div className="flex items-center space-x-2">
                   <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wide">
-                    {activeModalAlert.event_type?.replace(/_/g, ' ')} Alert Forensic Inspection
+                    {activeModalAlert.event_type?.toUpperCase().includes('VIOLENCE') || activeModalAlert.event_type?.toUpperCase().includes('FIGHT')
+                      ? '⚠ Violence Detected'
+                      : `${activeModalAlert.event_type?.replace(/_/g, ' ')} Alert Forensic Inspection`}
                   </h3>
                   <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
                     VERIFIED ANOMALY
                   </span>
                 </div>
-                <p className="text-xs text-slate-400 font-mono mt-0.5">
-                  Camera: {activeModalAlert.camera_name} ({activeModalAlert.camera_location}) | {new Date(activeModalAlert.timestamp).toLocaleString()}
-                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2 text-xs font-mono text-slate-300 bg-slate-900/80 p-2.5 rounded-xl border border-dark-border">
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Camera</span>
+                    <span className="font-bold text-slate-200 truncate block">
+                      {activeModalAlert.camera_name} {activeModalAlert.camera_location ? `(${activeModalAlert.camera_location})` : ''}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Time</span>
+                    <span className="font-bold text-slate-200 block">
+                      {new Date(activeModalAlert.timestamp).toLocaleString()}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Persons Identified</span>
+                    <span className="font-bold text-emerald-400 block">
+                      {activeModalAlert.persons_identified_count ?? (activeModalAlert.students?.length || (activeModalAlert.student_name ? 1 : 0))}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
 

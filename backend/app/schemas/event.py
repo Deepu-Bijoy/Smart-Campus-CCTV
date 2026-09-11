@@ -30,6 +30,7 @@ class EventResponse(BaseModel):
     evidence_image: Optional[str] = None
     evidence_video: Optional[str] = None
     tracks: List[EventTrackResponse] = []
+    persons_identified_count: Optional[int] = None
 
     class Config:
         from_attributes = True

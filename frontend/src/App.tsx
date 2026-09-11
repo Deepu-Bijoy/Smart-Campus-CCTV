@@ -9,6 +9,7 @@ import { Cameras } from './pages/Cameras';
 import { CameraDetails } from './pages/CameraDetails';
 import { Events } from './pages/Events';
 import { EventDetails } from './pages/EventDetails';
+import { ViolenceDetection } from './pages/ViolenceDetection';
 import { Reports } from './pages/Reports';
 import { ReportDetails } from './pages/ReportDetails';
 import { UploadFeed } from './pages/Upload';
@@ -56,6 +57,7 @@ const Layout: React.FC = () => {
             <Route path="/cameras/:id" element={<CameraDetails />} />
             <Route path="/events" element={<Events />} />
             <Route path="/events/:id" element={<EventDetails />} />
+            <Route path="/violence" element={<ViolenceDetection />} />
             <Route path="/reports" element={<Reports />} />
             <Route path="/reports/:id" element={<ReportDetails />} />
             <Route path="/upload" element={<UploadFeed />} />

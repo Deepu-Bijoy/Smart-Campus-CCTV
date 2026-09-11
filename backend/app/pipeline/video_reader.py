@@ -1,6 +1,6 @@
 import cv2
 import logging
-from typing import Generator, Tuple, Any
+from typing import Generator, Tuple, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -9,9 +9,15 @@ class VideoReader:
         self.file_path = file_path
         self.target_fps = target_fps
 
-    def read_frames(self) -> Generator[Tuple[int, float, Any], None, None]:
+    def read_frames(
+        self,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
+    ) -> Generator[Tuple[int, float, Any], None, None]:
         """
         Reads frames from the video file sequentially at target_fps.
+        Optionally accepts start_time and end_time (in seconds) to process
+        only a specific segment window.
         Uses cap.grab() to skip decoding non-target frames for high performance.
         Yields: (frame_number, timestamp_seconds, frame_image)
         """
@@ -32,19 +38,32 @@ class VideoReader:
         
         logger.info(
             f"Processing video: {self.file_path}. Original FPS: {original_fps:.2f}, "
-            f"Target FPS: {self.target_fps}, Frame Interval: {frame_interval}"
+            f"Target FPS: {self.target_fps}, Frame Interval: {frame_interval}, "
+            f"Window: [{start_time if start_time is not None else 0.0}s, {end_time if end_time is not None else 'EOF'}s]"
         )
         
         frame_num = 0
+        if start_time is not None and start_time > 0:
+            target_start_frame = int(round(start_time * original_fps))
+            if 0 <= target_start_frame < total_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_start_frame)
+                frame_num = target_start_frame
+        
+        end_frame = int(round(end_time * original_fps)) if (end_time is not None and end_time > 0) else None
         yielded_count = 0
         
         try:
             while True:
+                if end_frame is not None and frame_num > end_frame:
+                    break
+                    
                 if frame_num % frame_interval == 0:
                     ret, frame = cap.read()
                     if not ret:
                         break
                     timestamp = frame_num / original_fps
+                    if end_time is not None and timestamp > (end_time + 1e-3):
+                        break
                     yield frame_num, timestamp, frame
                     yielded_count += 1
                 else:

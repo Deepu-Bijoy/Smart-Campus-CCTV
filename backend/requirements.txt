@@ -38,6 +38,7 @@ redis>=5.0.3
 opencv-python-headless>=4.9.0
 pillow>=10.2.0
 ultralytics>=8.2.0
+fvcore>=0.1.5.post20221221
 
 # ── ByteTrack / Tracking ───────────────────────
 # lapx is a drop-in replacement for lap with prebuilt

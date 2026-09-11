@@ -9,7 +9,6 @@ export const Videos: React.FC = () => {
   const queryClient = useQueryClient();
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [selectedVideoId, setSelectedVideoId] = useState<string | null>(null);
-  const [selectedVideoStatus, setSelectedVideoStatus] = useState<string | null>(null);
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
@@ -19,13 +18,11 @@ export const Videos: React.FC = () => {
       queryClient.invalidateQueries({ queryKey: ['videos-list'] });
       setIsDeleteModalOpen(false);
       setSelectedVideoId(null);
-      setSelectedVideoStatus(null);
     },
     onError: (err: any) => {
       alert(`Deletion failed: ${err.response?.data?.detail || err.message}`);
       setIsDeleteModalOpen(false);
       setSelectedVideoId(null);
-      setSelectedVideoStatus(null);
     }
   });
 
@@ -116,7 +113,6 @@ export const Videos: React.FC = () => {
                             return;
                           }
                           setSelectedVideoId(vid.id);
-                          setSelectedVideoStatus(vid.status);
                           setIsDeleteModalOpen(true);
                         }}
                         disabled={deleteMutation.isPending}
@@ -142,7 +138,7 @@ export const Videos: React.FC = () => {
 
       <DeleteConfirmationModal
         isOpen={isDeleteModalOpen}
-        onClose={() => { setIsDeleteModalOpen(false); setSelectedVideoId(null); setSelectedVideoStatus(null); }}
+        onClose={() => { setIsDeleteModalOpen(false); setSelectedVideoId(null); }}
         onConfirm={() => { if (selectedVideoId) deleteMutation.mutate(selectedVideoId); }}
         title="Delete CCTV Video Feed"
         message="Deleting this video will remove associated AI analysis data, events, and tracking indices. Continue?"

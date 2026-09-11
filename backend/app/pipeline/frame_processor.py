@@ -3,7 +3,7 @@ import uuid
 import cv2
 import torch
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from app.core.config import settings
 from app.pipeline.video_reader import VideoReader
 from app.pipeline.detector import YOLOv8Detector
@@ -203,3 +203,156 @@ class FrameProcessor:
             print(f"Stage 5: Embedding {idx} length: {len(c['embedding'])}")
             
         return final_tracks, detections_list, reids_list, clips_list, processed_count
+
+    def _check_face_visible(self, crop: Any) -> bool:
+        """
+        Evaluates whether a visible human face is detectable in the person crop,
+        WITHOUT performing any ArcFace matching or student identity comparison.
+        Gracefully falls back to False if no face is detected or if face models are uninitialized.
+        """
+        try:
+            from app.pipeline.face_engine import FaceEnrollmentEngine
+            engine = FaceEnrollmentEngine()
+            if engine.model is not None:
+                h, w = crop.shape[:2]
+                upper_crop = crop[:max(20, int(h * 0.55)), :] if h > 30 else crop
+                faces = engine.model.get(upper_crop)
+                return len(faces) > 0
+        except Exception:
+            pass
+        return False
+
+    def process_segment(
+        self,
+        start_time: float,
+        end_time: float,
+        event_id: Optional[uuid.UUID] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """
+        Processes only the video frames within [start_time, end_time] using the existing
+        YOLOv8 detector and ByteTrack tracker.
+        Assigns persistent track IDs to people appearing in the segment.
+        Extracts suitable frames/crops for later face recognition, handling cases where
+        faces are not visible (e.g. back turned, occluded, blurred) and partially visible people
+        (edge bounds clamped).
+        Strictly does NOT perform ArcFace biometric matching.
+        Returns: (tracks_list, detections_list, crops_list)
+        """
+        tracks_map = {}
+        detections_list = []
+        crops_list = []
+        track_best_crop = {}
+        
+        logger.info(
+            f"Segment person tracking started for video {self.video_id} (Window: {start_time:.1f}s - {end_time:.1f}s, Event: {event_id})"
+        )
+        frame_generator = self.reader.read_frames(start_time=start_time, end_time=end_time)
+        processed_count = 0
+        
+        for frame_num, timestamp, frame in frame_generator:
+            persist = processed_count > 0
+            result = self.tracker.track_frame(self.detector, frame, persist=persist)
+            processed_count += 1
+            
+            if result is None or result.boxes is None:
+                continue
+                
+            boxes = result.boxes
+            if boxes.id is not None:
+                tracker_ids = boxes.id.int().cpu().tolist()
+                xyxys = boxes.xyxy.cpu().tolist()
+                confs = boxes.conf.cpu().tolist()
+                clss = boxes.cls.int().cpu().tolist()
+                
+                height, width = frame.shape[:2]
+                
+                for xyxy, track_id, conf, cls_id in zip(xyxys, tracker_ids, confs, clss):
+                    object_class = self.detector.class_names.get(cls_id, "unknown")
+                    # We focus on people appearing in the violence segment
+                    if object_class != "person":
+                        continue
+                        
+                    if track_id not in tracks_map:
+                        tracks_map[track_id] = {
+                            "tracker_id": track_id,
+                            "object_class": "person",
+                            "start_time": timestamp,
+                            "end_time": timestamp,
+                            "temp_id": track_id,
+                            "event_id": str(event_id) if event_id else None,
+                            "face_visible": False,
+                            "key_crop_path": None
+                        }
+                    else:
+                        tracks_map[track_id]["end_time"] = timestamp
+                        
+                    # Handle partially visible people: clamp bounding boxes cleanly to frame bounds
+                    x1, y1, x2, y2 = xyxy
+                    x1_abs = max(0, min(width - 1, int(round(x1))))
+                    y1_abs = max(0, min(height - 1, int(round(y1))))
+                    x2_abs = max(x1_abs + 1, min(width, int(round(x2))))
+                    y2_abs = max(y1_abs + 1, min(height, int(round(y2))))
+                    
+                    detection_data = {
+                        "frame_number": frame_num,
+                        "timestamp_seconds": timestamp,
+                        "bounding_box": [float(x1), float(y1), float(x2), float(y2)],
+                        "confidence": float(conf),
+                        "track_temp_id": track_id,
+                        "object_class": "person",
+                        "event_id": str(event_id) if event_id else None
+                    }
+                    detections_list.append(detection_data)
+                    
+                    # Crop extraction handling
+                    crop_w = x2_abs - x1_abs
+                    crop_h = y2_abs - y1_abs
+                    if crop_w >= 15 and crop_h >= 25:
+                        crop = frame[y1_abs:y2_abs, x1_abs:x2_abs]
+                        if crop.size > 0:
+                            # Assess face visibility without performing ArcFace matching
+                            face_visible = self._check_face_visible(crop)
+                            
+                            crop_filename = f"seg_{track_id}_{frame_num}_{uuid.uuid4().hex[:6]}.jpg"
+                            crop_path = os.path.join(self.crops_dir, crop_filename)
+                            
+                            cur_best = track_best_crop.get(track_id)
+                            should_save = False
+                            if cur_best is None:
+                                should_save = True
+                            elif face_visible and not cur_best.get("face_visible", False):
+                                should_save = True
+                            elif conf > cur_best.get("confidence", 0.0) + 0.1:
+                                should_save = True
+                            elif (frame_num - cur_best.get("frame_number", 0)) >= 4:
+                                should_save = True
+                                
+                            if should_save:
+                                try:
+                                    cv2.imwrite(crop_path, crop)
+                                    crop_info = {
+                                        "event_id": str(event_id) if event_id else None,
+                                        "track_temp_id": track_id,
+                                        "tracker_id": track_id,
+                                        "frame_number": frame_num,
+                                        "timestamp_seconds": timestamp,
+                                        "bounding_box": [float(x1), float(y1), float(x2), float(y2)],
+                                        "crop_path": crop_path,
+                                        "confidence": float(conf),
+                                        "face_visible": face_visible
+                                    }
+                                    crops_list.append(crop_info)
+                                    track_best_crop[track_id] = crop_info
+                                    tracks_map[track_id]["key_crop_path"] = crop_path
+                                    if face_visible:
+                                        tracks_map[track_id]["face_visible"] = True
+                                except Exception as e:
+                                    logger.error(f"Failed to write segment person crop: {str(e)}")
+                                    
+        final_tracks = list(tracks_map.values())
+        logger.info(
+            f"Segment tracking completed for video {self.video_id}: {len(final_tracks)} person tracks, "
+            f"{len(detections_list)} detections, {len(crops_list)} crops extracted."
+        )
+        return final_tracks, detections_list, crops_list
+

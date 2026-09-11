@@ -83,3 +83,10 @@ Desktop.ini
 # Archives
 *.zip
 *.tar.gz
+
+# AI Model Files & Large Binaries (Keep models in local storage/models/)
+*.onnx
+*.pth
+*.bin
+storage/models/
+backend/storage/models/

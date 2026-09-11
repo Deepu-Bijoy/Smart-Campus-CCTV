@@ -45,12 +45,19 @@ def generate_subclip(video_path: str, timestamp: float, duration: float, output_
     if fps <= 0:
         fps = 25.0
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_len = total_frames / fps
+    video_len = total_frames / fps if total_frames > 0 else 0.0
     cap.release()
 
-    start_sec = max(0.0, timestamp - (duration / 2.0))
-    actual_duration = min(duration, video_len - start_sec)
-    if actual_duration <= 0:
+    if video_len > 0:
+        # Event near beginning: start at 0.0
+        # Event near end: shift start back to capture up to full duration
+        if (timestamp + (duration / 2.0)) > video_len:
+            start_sec = max(0.0, video_len - duration)
+        else:
+            start_sec = max(0.0, timestamp - (duration / 2.0))
+        actual_duration = max(0.5, min(duration, video_len - start_sec))
+    else:
+        start_sec = max(0.0, timestamp - (duration / 2.0))
         actual_duration = duration
 
     # 1. FFmpeg Encoding Strategy
@@ -131,3 +138,57 @@ def generate_subclip(video_path: str, timestamp: float, duration: float, output_
         if os.path.exists(output_path):
             os.remove(output_path)
         return False
+
+def extract_evidence_frame(video_path: str, timestamp: float, output_path: str) -> bool:
+    """
+    Extracts a representative full-frame image (JPEG) from the video at the given timestamp.
+    Handles boundaries gracefully (start, end, beyond length) and returns False on failure.
+    """
+    if not os.path.exists(video_path):
+        logger.error(f"Source video file not found at: {video_path}")
+        return False
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        logger.error(f"Failed to open source video at: {video_path}")
+        return False
+
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 25.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            logger.warning(f"Video has 0 or invalid frame count: {video_path}")
+            cap.release()
+            return False
+
+        # Target frame calculation bounded between 0 and total_frames - 1
+        target_frame = max(0, min(int(timestamp * fps), total_frames - 1))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+        ret, frame = cap.read()
+
+        if not ret or frame is None or frame.size == 0:
+            # Fallback to reading first available frame
+            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = cap.read()
+
+        cap.release()
+
+        if ret and frame is not None and frame.size > 0:
+            success = cv2.imwrite(output_path, frame)
+            if success and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                logger.info(f"Evidence frame extracted successfully: {output_path}")
+                return True
+            else:
+                logger.warning(f"Failed to write evidence frame image to: {output_path}")
+                return False
+        return False
+    except Exception as e:
+        logger.error(f"Exception while extracting evidence frame: {str(e)}")
+        if cap.isOpened():
+            cap.release()
+        return False
+

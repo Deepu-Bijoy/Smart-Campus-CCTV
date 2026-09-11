@@ -9,11 +9,7 @@ import {
   Eye, 
   Calendar, 
   User, 
-  FileText, 
-  Download, 
   AlertTriangle,
-  Clock,
-  ExternalLink,
   ChevronRight,
   Trash2
 } from 'lucide-react';
