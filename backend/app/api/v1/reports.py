@@ -4,6 +4,7 @@ from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api import deps
@@ -56,18 +57,70 @@ async def generate_report(
 ) -> Any:
     logger.info(f"Generating investigation report: '{payload.title}' by user {current_user.id}")
     
+    report_data = dict(payload.data) if isinstance(payload.data, dict) else {}
+    report_data["created_by"] = str(current_user.id)
+
+    # Resolve target incident ID if present (payload.incident_id or payload.data incident_id/event_id)
+    target_incident_id = payload.incident_id
+    if not target_incident_id and isinstance(payload.data, dict):
+        raw_inc = payload.data.get("incident_id") or payload.data.get("event_id")
+        if raw_inc:
+            try:
+                target_incident_id = uuid.UUID(str(raw_inc))
+            except Exception:
+                pass
+
+    if target_incident_id:
+        report_data["incident_id"] = str(target_incident_id)
+        # Idempotency check: reuse existing report for the same incident
+        stmt = select(Report).filter(Report.incident_id == target_incident_id)
+        res = await db.execute(stmt)
+        existing = res.scalars().first()
+        if existing:
+            logger.info(f"Report for incident {target_incident_id} already exists (id={existing.id}). Returning existing report.")
+            return existing
+    else:
+        # Idempotency check for identical repeated report submissions without explicit incident_id
+        stmt = select(Report).filter(
+            Report.title == payload.title,
+            Report.incident_type == payload.incident_type,
+            Report.student_id == payload.student_id
+        ).order_by(Report.created_at.desc())
+        res = await db.execute(stmt)
+        candidates = res.scalars().all()
+        for cand in candidates:
+            c_data = cand.data or {}
+            if c_data.get("evidence") == report_data.get("evidence") and c_data.get("created_by") == str(current_user.id):
+                logger.info(f"Identical report already exists (id={cand.id}). Returning existing report.")
+                return cand
+
     report_obj = Report(
         id=uuid.uuid4(),
         title=payload.title,
         incident_type=payload.incident_type,
+        incident_id=target_incident_id,
         student_id=payload.student_id,
         created_at=datetime.now(timezone.utc),
-        data=payload.data
+        data=report_data
     )
     db.add(report_obj)
-    await db.commit()
-    await db.refresh(report_obj)
-    return report_obj
+    try:
+        await db.commit()
+        await db.refresh(report_obj)
+        return report_obj
+    except IntegrityError as exc:
+        await db.rollback()
+        if target_incident_id:
+            stmt = select(Report).filter(Report.incident_id == target_incident_id)
+            res = await db.execute(stmt)
+            existing = res.scalars().first()
+            if existing:
+                logger.info(
+                    f"Concurrent race resolved: Report for incident {target_incident_id} "
+                    f"was already created (id={existing.id}). Returning existing report."
+                )
+                return existing
+        raise exc
 
 @router.get("/{id}", response_model=ReportResponse)
 async def get_report(
@@ -79,6 +132,12 @@ async def get_report(
     res = await db.execute(stmt)
     report_obj = res.scalars().first()
     if not report_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found."
+        )
+    rep_owner = (report_obj.data or {}).get("created_by") if isinstance(report_obj.data, dict) else None
+    if rep_owner and rep_owner != str(current_user.id) and (current_user.role or "").lower() != "admin":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found."
@@ -96,6 +155,12 @@ async def download_report(
     res = await db.execute(stmt)
     report_obj = res.scalars().first()
     if not report_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found."
+        )
+    rep_owner = (report_obj.data or {}).get("created_by") if isinstance(report_obj.data, dict) else None
+    if rep_owner and rep_owner != str(current_user.id) and (current_user.role or "").lower() != "admin":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found."

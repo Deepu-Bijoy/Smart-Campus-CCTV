@@ -1,8 +1,12 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Home, Video, UploadCloud, Users, Search, Settings, Camera, ShieldAlert, FileText, Swords } from 'lucide-react';
+import { Home, Video, UploadCloud, Users, Search, Settings, Camera, ShieldAlert, FileText, Swords, UserPlus } from 'lucide-react';
+import { useAuthStore } from '../store/useAuthStore';
 
 export const Sidebar: React.FC = () => {
+  const user = useAuthStore((state) => state.user);
+  const isAdmin = user?.role?.toLowerCase() === 'admin';
+
   const menuItems = [
     { name: 'Dashboard', path: '/', icon: Home },
     { name: 'Surveillance Feeds', path: '/videos', icon: Video },
@@ -39,6 +43,27 @@ export const Sidebar: React.FC = () => {
             <span>{item.name}</span>
           </NavLink>
         ))}
+
+        {isAdmin && (
+          <div className="pt-3 mt-3 border-t border-dark-border/60">
+            <div className="px-4 pb-2 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+              User Management
+            </div>
+            <NavLink
+              to="/users/create"
+              className={({ isActive }) =>
+                `flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+                  isActive
+                    ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-500/20'
+                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                }`
+              }
+            >
+              <UserPlus className="h-5 w-5" />
+              <span>Add User</span>
+            </NavLink>
+          </div>
+        )}
       </nav>
     </aside>
   );

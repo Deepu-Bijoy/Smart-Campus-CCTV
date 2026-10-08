@@ -130,6 +130,99 @@ async def startup_event():
                 print("Database migration: added embedding_generated column to students table.")
             except Exception:
                 pass
+            try:
+                await conn.execute(sqlalchemy.text("ALTER TABLE reports ADD COLUMN incident_id CHAR(36)"))
+                print("Database migration: added incident_id column to reports table.")
+            except Exception:
+                pass
+
+            # Migration for FAIL-04: Enforce UNIQUE constraint on reports.incident_id
+            try:
+                # 1. Verify existing database records: detect duplicate non-null incident_id values
+                dup_res = await conn.execute(sqlalchemy.text(
+                    "SELECT incident_id, COUNT(*) as cnt FROM reports "
+                    "WHERE incident_id IS NOT NULL "
+                    "GROUP BY incident_id HAVING COUNT(*) > 1"
+                ))
+                dups = dup_res.fetchall()
+                if dups:
+                    dup_details = [(str(d[0]), d[1]) for d in dups]
+                    err_msg = (
+                        f"FATAL DATABASE INTEGRITY ERROR: Found {len(dups)} duplicate incident_id "
+                        f"group(s) in reports table: {dup_details}. Aborting UNIQUE index creation "
+                        "without modifying or deleting existing records."
+                    )
+                    logger.error(err_msg)
+                    raise RuntimeError(err_msg)
+
+                # 2. Upgrade non-unique index to UNIQUE index (SQLite and PostgreSQL compatible)
+                try:
+                    await conn.execute(sqlalchemy.text("DROP INDEX IF EXISTS ix_reports_incident_id"))
+                except Exception:
+                    pass
+
+                await conn.execute(sqlalchemy.text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_reports_incident_id ON reports(incident_id)"
+                ))
+                print("Database migration: enforced UNIQUE index ix_reports_incident_id on reports(incident_id).")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"Database migration notice for reports(incident_id) unique index: {e}")
+
+            # Migration for DEFECT-DB-02: Enforce FOREIGN KEY on reports.incident_id -> incidents(id) ON DELETE SET NULL
+            try:
+                # 1. Audit existing reports for invalid incident_id references before applying constraint
+                inv_res = await conn.execute(sqlalchemy.text(
+                    "SELECT id, incident_id FROM reports "
+                    "WHERE incident_id IS NOT NULL AND incident_id NOT IN (SELECT id FROM incidents)"
+                ))
+                invalid_reports = inv_res.fetchall()
+                if invalid_reports:
+                    inv_details = [(str(r[0]), str(r[1])) for r in invalid_reports]
+                    err_msg = (
+                        f"FATAL DATABASE INTEGRITY ERROR: Found {len(invalid_reports)} report(s) with invalid "
+                        f"incident_id references: {inv_details}. Aborting foreign key migration without modifying records."
+                    )
+                    logger.error(err_msg)
+                    raise RuntimeError(err_msg)
+
+                # 2. In SQLite, check if reports table already has foreign key on incident_id
+                fk_res = await conn.execute(sqlalchemy.text("PRAGMA foreign_key_list(reports)"))
+                fks = fk_res.fetchall()
+                has_incident_fk = any(fk[2] == "incidents" and fk[3] == "incident_id" for fk in fks)
+
+                if not has_incident_fk:
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    await conn.execute(sqlalchemy.text("""
+                        CREATE TABLE reports_new (
+                            id CHAR(36) NOT NULL,
+                            title VARCHAR(100) NOT NULL,
+                            incident_type VARCHAR(50) NOT NULL,
+                            incident_id CHAR(36),
+                            student_id CHAR(36),
+                            created_at DATETIME NOT NULL,
+                            data JSON NOT NULL,
+                            PRIMARY KEY (id),
+                            FOREIGN KEY(student_id) REFERENCES students (id) ON DELETE SET NULL,
+                            FOREIGN KEY(incident_id) REFERENCES incidents (id) ON DELETE SET NULL
+                        )
+                    """))
+                    await conn.execute(sqlalchemy.text("""
+                        INSERT INTO reports_new (id, title, incident_type, incident_id, student_id, created_at, data)
+                        SELECT id, title, incident_type, incident_id, student_id, created_at, data FROM reports
+                    """))
+                    await conn.execute(sqlalchemy.text("DROP TABLE reports"))
+                    await conn.execute(sqlalchemy.text("ALTER TABLE reports_new RENAME TO reports"))
+                    await conn.execute(sqlalchemy.text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ix_reports_incident_id ON reports(incident_id)"
+                    ))
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print("Database migration: added FOREIGN KEY (incident_id) REFERENCES incidents (id) ON DELETE SET NULL to reports table.")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"Database migration notice for reports foreign key: {e}")
                 
             # Create SQL indexes for query optimization
             for idx_name, table, column in [
@@ -297,8 +390,66 @@ app.include_router(notifications.router, prefix=f"{settings.API_V1_STR}/notifica
 app.include_router(investigations.router, prefix=f"{settings.API_V1_STR}", tags=["Investigations"])
 app.include_router(violence.router, prefix=f"{settings.API_V1_STR}/violence", tags=["Violence Detection"])
 
-from fastapi.staticfiles import StaticFiles
-app.mount("/storage", StaticFiles(directory=settings.STORAGE_DIR), name="storage")
+import os
+import jwt
+from typing import Optional
+from fastapi import Header, Query, HTTPException, status
+from fastapi.responses import FileResponse
+from app.core import security
+
+@app.get("/storage/{file_path:path}")
+async def get_protected_storage_file(
+    file_path: str,
+    authorization: Optional[str] = Header(None),
+    token: Optional[str] = Query(None)
+):
+    """
+    Secure file access for surveillance media assets.
+    Requires authentication via Authorization header or ?token= query parameter.
+    Blocks access to raw database files, model weights, and system configs.
+    """
+    raw_token = token
+    if not raw_token and authorization and authorization.startswith("Bearer "):
+        raw_token = authorization.split("Bearer ", 1)[1]
+    
+    if not raw_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required to access storage assets"
+        )
+    
+    try:
+        jwt.decode(raw_token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        if security.is_token_revoked(raw_token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token has been revoked"
+            )
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired authentication credentials"
+        )
+
+    # Strictly block system, database, and neural model files
+    blocked_exts = {".db", ".sqlite", ".sqlite3", ".pt", ".onnx", ".env", ".py", ".json", ".sh", ".key"}
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in blocked_exts:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access to database, model, or configuration files is strictly forbidden"
+        )
+
+    abs_storage = os.path.abspath(settings.STORAGE_DIR)
+    target_file = os.path.abspath(os.path.join(abs_storage, file_path))
+    if os.path.commonpath([abs_storage, target_file]) != abs_storage or not os.path.exists(target_file):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Requested file not found"
+        )
+
+    return FileResponse(target_file)
+
 
 @app.get("/")
 async def root():

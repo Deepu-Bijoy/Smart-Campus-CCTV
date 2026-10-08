@@ -27,6 +27,42 @@ class SqliteCompatibleArray(TypeDecorator):
 sqlalchemy.ARRAY = SqliteCompatibleArray
 sqlalchemy.types.ARRAY = SqliteCompatibleArray
 
+import uuid as _python_uuid
+from sqlalchemy.types import CHAR
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+import sqlalchemy.dialects.postgresql
+
+class SqliteCompatibleUUID(TypeDecorator):
+    impl = PG_UUID
+    cache_ok = True
+
+    def __init__(self, as_uuid=True, *args, **kwargs):
+        self.as_uuid = as_uuid
+        super().__init__(as_uuid=as_uuid, *args, **kwargs)
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "sqlite":
+            return dialect.type_descriptor(CHAR(36))
+        else:
+            return dialect.type_descriptor(PG_UUID(as_uuid=self.as_uuid))
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "sqlite":
+            return str(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, _python_uuid.UUID):
+            return value
+        return _python_uuid.UUID(str(value))
+
+sqlalchemy.dialects.postgresql.UUID = SqliteCompatibleUUID
+sqlalchemy.types.UUID = SqliteCompatibleUUID
+
 
 def parse_cors_origins(v: Union[str, List[str]]) -> List[str]:
     if isinstance(v, str) and not v.startswith("["):
@@ -44,8 +80,9 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "AI-Powered Smart CCTV Investigation System"
     
     # Security / Auth
-    SECRET_KEY: str = Field(default="SUPER_SECRET_REPLACE_THIS_IN_PRODUCTION")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    LEGACY_DEFAULT_SECRET: str = "SUPER_SECRET_REPLACE_THIS_IN_PRODUCTION"
+    SECRET_KEY: str = Field(default="7f9b8c2d1e0a4f5b6c7d8e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c")
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60  # 60 minutes
     ALGORITHM: str = "HS256"
 
     # CORS

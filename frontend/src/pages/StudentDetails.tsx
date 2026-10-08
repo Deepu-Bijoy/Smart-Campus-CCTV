@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { User, Award, Shield, UploadCloud, Cpu, AlertCircle, CheckCircle2, RefreshCw, Eye, Trash2 } from 'lucide-react';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const StudentDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -185,8 +186,8 @@ export const StudentDetails: React.FC = () => {
               {photos && photos.length > 0 ? (
                 photos.map((photo: any) => (
                   <div key={photo.id} className="border border-dark-border rounded-xl overflow-hidden bg-slate-950 relative group aspect-square">
-                    <img
-                      src={`http://127.0.0.1:8000/${photo.photo_path.replace(/^\/+/, '')}`}
+                    <AuthenticatedImage
+                      src={`/storage/${photo.photo_path.replace(/\\/g, '/').replace(/^\/+/, '').replace(/^storage\//, '')}`}
                       alt={photo.view}
                       className="w-full h-full object-cover"
                     />

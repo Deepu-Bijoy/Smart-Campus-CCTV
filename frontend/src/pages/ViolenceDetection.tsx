@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
 import { api } from '../services/api';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export interface UploadedVideoInfo {
   video_id: string;
@@ -1088,7 +1089,7 @@ export const ViolenceDetection: React.FC = () => {
                         >
                           {activeSeg.evidence_image ? (
                             <>
-                              <img
+                              <AuthenticatedImage
                                 src={activeSeg.evidence_image}
                                 alt="Detected Evidence Frame"
                                 className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
@@ -1233,7 +1234,7 @@ export const ViolenceDetection: React.FC = () => {
                               <td className="py-3 px-4">
                                 <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center">
                                   {isKnown && person.profile_photo_url ? (
-                                    <img
+                                    <AuthenticatedImage
                                       src={person.profile_photo_url}
                                       alt={person.name}
                                       className="w-full h-full object-cover"
@@ -1350,7 +1351,7 @@ export const ViolenceDetection: React.FC = () => {
 
                         {mapItem.person_crop && (
                           <div className="w-10 h-10 rounded-lg overflow-hidden bg-slate-950 border border-slate-800 shrink-0 ml-2">
-                            <img 
+                            <AuthenticatedImage 
                               src={mapItem.person_crop} 
                               alt={`Track ${mapItem.tracker_id} crop`} 
                               className="w-full h-full object-cover" 
@@ -1708,8 +1709,8 @@ export const ViolenceDetection: React.FC = () => {
               </button>
             </div>
             <div className="rounded-xl overflow-hidden bg-black max-h-[75vh] flex items-center justify-center">
-              <img
-                src={selectedEvidenceFrame}
+              <AuthenticatedImage
+                src={selectedEvidenceFrame || ''}
                 alt="Full Evidence Frame"
                 className="w-full h-full object-contain"
               />

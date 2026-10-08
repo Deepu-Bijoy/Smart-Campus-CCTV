@@ -16,6 +16,7 @@ import {
   Lock
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const Events: React.FC = () => {
   const [selectedFilter, setSelectedFilter] = useState<string>('ALL');
@@ -334,11 +335,10 @@ export const Events: React.FC = () => {
                     <span>Frame Screenshot Crop</span>
                   </span>
                   <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950 flex justify-center p-1">
-                    <img
-                      src={`${API_URL}${activeModalAlert.evidence_image}`}
+                    <AuthenticatedImage
+                      src={activeModalAlert.evidence_image}
                       alt="Alert Screenshot"
                       className="max-h-56 object-contain rounded-lg"
-                      onError={(e: any) => { e.target.src = '/storage/crops/simulated_face.jpg'; }}
                     />
                   </div>
                 </div>

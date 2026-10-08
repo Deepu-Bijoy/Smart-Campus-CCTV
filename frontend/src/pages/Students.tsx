@@ -12,6 +12,7 @@ export const Students: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [page, setPage] = useState(1);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
   const { register, handleSubmit, reset, formState: { errors } } = useForm();
   const limit = 6;
 
@@ -40,11 +41,26 @@ export const Students: React.FC = () => {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['students-list'] });
       setIsModalOpen(false);
+      setFormError(null);
       reset();
+    },
+    onError: (err: any) => {
+      let msg = 'Failed to register student profile.';
+      if (err.response?.data?.detail) {
+        if (Array.isArray(err.response.data.detail)) {
+          msg = err.response.data.detail.map((d: any) => `${d.loc?.slice(-1)[0] || 'Field'}: ${d.msg}`).join(', ');
+        } else if (typeof err.response.data.detail === 'string') {
+          msg = err.response.data.detail;
+        }
+      } else if (err.message) {
+        msg = err.message;
+      }
+      setFormError(msg);
     }
   });
 
   const onSubmit = (data: any) => {
+    setFormError(null);
     registerMutation.mutate(data);
   };
 
@@ -128,6 +144,7 @@ export const Students: React.FC = () => {
             <button
               onClick={() => {
                 setIsModalOpen(false);
+                setFormError(null);
                 reset();
               }}
               className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 transition"
@@ -139,6 +156,12 @@ export const Students: React.FC = () => {
               <h3 className="text-xl font-bold text-slate-100">Enroll Student Profile</h3>
               <p className="text-slate-400 text-xs">Fill out university enrollment details</p>
             </div>
+
+            {formError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center space-x-2">
+                <span>{formError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
@@ -173,6 +196,7 @@ export const Students: React.FC = () => {
                     placeholder="Computer Science"
                     className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
                   />
+                  {errors.department && <span className="text-xs text-red-400">{String(errors.department.message)}</span>}
                 </div>
                 <div className="space-y-1">
                   <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Programme</label>
@@ -182,6 +206,7 @@ export const Students: React.FC = () => {
                     placeholder="B.Tech"
                     className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
                   />
+                  {errors.programme && <span className="text-xs text-red-400">{String(errors.programme.message)}</span>}
                 </div>
               </div>
 
@@ -208,10 +233,11 @@ export const Students: React.FC = () => {
                   <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Section</label>
                   <input
                     type="text"
-                    {...register('section')}
+                    {...register('section', { required: 'Section is required' })}
                     placeholder="A"
                     className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
                   />
+                  {errors.section && <span className="text-xs text-red-400">{String(errors.section.message)}</span>}
                 </div>
               </div>
 
@@ -223,6 +249,7 @@ export const Students: React.FC = () => {
                   placeholder="jane@university.edu"
                   className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
                 />
+                {errors.email && <span className="text-xs text-red-400">{String(errors.email.message)}</span>}
               </div>
 
               <button

@@ -214,7 +214,7 @@ async def get_incident_evidence(
 async def delete_evidence(
     evidence_id: uuid.UUID,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> None:
     """
     Remove a specific evidence record from the database and delete its physical media clip/crop on disk.

@@ -3,6 +3,7 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { ShieldAlert, ArrowLeft, Video, User, AlertCircle, Eye, Swords, Users } from 'lucide-react';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const EventDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -119,11 +120,10 @@ export const EventDetails: React.FC = () => {
                 <span>Subject Frame Screenshot Crop</span>
               </div>
               <div className="rounded-xl overflow-hidden bg-slate-950 border border-dark-border flex justify-center p-2">
-                <img
-                  src={`${API_URL}${event.evidence_image}`}
+                <AuthenticatedImage
+                  src={event.evidence_image}
                   alt="Anomaly Crop"
                   className="max-h-72 object-contain rounded-lg"
-                  onError={(e: any) => { e.target.src = '/storage/crops/simulated_face.jpg'; }}
                 />
               </div>
             </div>

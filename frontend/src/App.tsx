@@ -19,6 +19,7 @@ import { BulkImport } from './pages/BulkImport';
 import { Search } from './pages/Search';
 import { TimelinePage } from './pages/TimelinePage';
 import { Settings } from './pages/Settings';
+import { CreateUser } from './pages/UserManagement/CreateUser';
 import { Sidebar } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
 
@@ -40,6 +41,25 @@ const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children }) => {
   if (!token) {
     return <Navigate to="/login" replace />;
   }
+  return children;
+};
+
+interface AdminRouteProps {
+  children: React.ReactElement;
+}
+
+const AdminRoute: React.FC<AdminRouteProps> = ({ children }) => {
+  const token = useAuthStore(state => state.token);
+  const user = useAuthStore(state => state.user);
+
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+
+  if (user?.role?.toLowerCase() !== 'admin') {
+    return <Navigate to="/" replace />;
+  }
+
   return children;
 };
 
@@ -67,6 +87,14 @@ const Layout: React.FC = () => {
             <Route path="/search" element={<Search />} />
             <Route path="/timeline/:id" element={<TimelinePage />} />
             <Route path="/settings" element={<Settings />} />
+            <Route
+              path="/users/create"
+              element={
+                <AdminRoute>
+                  <CreateUser />
+                </AdminRoute>
+              }
+            />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

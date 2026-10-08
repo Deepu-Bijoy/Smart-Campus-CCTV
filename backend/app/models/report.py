@@ -1,3 +1,4 @@
+from typing import Optional
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import String, DateTime, ForeignKey, JSON
@@ -11,7 +12,10 @@ class Report(Base):
     )
     title: Mapped[str] = mapped_column(String(100), nullable=False)
     incident_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    student_id: Mapped[uuid.UUID] = mapped_column(
+    incident_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("incidents.id", ondelete="SET NULL"), nullable=True, unique=True, index=True
+    )
+    student_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("students.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

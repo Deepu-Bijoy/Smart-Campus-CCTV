@@ -1,9 +1,11 @@
 import { create } from 'zustand';
 
-interface User {
+export interface User {
   id: string;
   email: string;
   full_name: string;
+  role?: string;
+  is_active?: boolean;
 }
 
 interface AuthState {
@@ -12,6 +14,7 @@ interface AuthState {
   setAuth: (token: string, user: User) => void;
   logout: () => void;
   isAuthenticated: () => boolean;
+  isAdmin: () => boolean;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => ({
@@ -27,5 +30,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     localStorage.removeItem('user');
     set({ token: null, user: null });
   },
-  isAuthenticated: () => !!get().token
+  isAuthenticated: () => !!get().token,
+  isAdmin: () => {
+    const user = get().user;
+    return user?.role?.toLowerCase() === 'admin';
+  }
 }));

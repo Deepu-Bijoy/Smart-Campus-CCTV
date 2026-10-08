@@ -23,7 +23,7 @@ router = APIRouter()
 async def create_camera(
     camera_in: CameraCreate,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> Any:
     """
     Register a new surveillance camera in the database.
@@ -105,7 +105,7 @@ async def update_camera(
     id: uuid.UUID,
     camera_in: CameraUpdate,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> Any:
     """
     Update field properties of a camera.
@@ -135,7 +135,7 @@ async def update_camera(
 async def delete_camera(
     id: uuid.UUID,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> Any:
     """
     Remove a camera and associated zones/calibrations from index.
@@ -159,7 +159,7 @@ async def create_camera_zone(
     id: uuid.UUID,
     zone_in: VirtualZoneCreate,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> Any:
     """
     Add a polygon or line virtual monitoring zone to a camera.
@@ -192,7 +192,7 @@ async def delete_camera_zone(
     id: uuid.UUID,
     zone_id: uuid.UUID,
     db: AsyncSession = Depends(deps.get_db),
-    current_user: User = Depends(deps.get_current_user)
+    current_user: User = Depends(deps.require_admin)
 ) -> Any:
     """
     Delete a virtual zone.

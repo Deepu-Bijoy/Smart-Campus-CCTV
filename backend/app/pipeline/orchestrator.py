@@ -286,6 +286,26 @@ class VideoProcessingOrchestrator:
 
     async def _stage_validate_video(self, video: Video) -> None:
         import os
+        import cv2
+
         if not os.path.exists(video.file_path):
             raise FileNotFoundError(f"Video file not found at: {video.file_path}")
+
+        if os.path.getsize(video.file_path) == 0:
+            raise ValueError(f"Video file is empty (0 bytes): {video.file_path}")
+
+        cap = cv2.VideoCapture(video.file_path)
+        if not cap.isOpened():
+            raise ValueError(f"Corrupted or unreadable video container: {video.file_path}")
+
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            raise ValueError(f"Video stream contains zero decodable frames: {video.file_path}")
+
+        if fps <= 0:
+            raise ValueError(f"Video stream has invalid or non-positive framerate (fps={fps}): {video.file_path}")
+
         await asyncio.sleep(0.1)

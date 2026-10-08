@@ -90,3 +90,9 @@ Desktop.ini
 *.bin
 storage/models/
 backend/storage/models/
+# Local AI model weights
+*.pt
+weights/
+
+# Audit/debug scratch files
+backend/scratch/

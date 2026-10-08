@@ -13,11 +13,22 @@ export const Dashboard: React.FC = () => {
     }
   });
 
-  const { data: recentVideos } = useQuery({
+  const { data: recentVideos, isLoading: videosLoading } = useQuery({
     queryKey: ['recent-videos'],
     queryFn: async () => {
-      const response = await api.get('/videos?limit=5');
-      return response.data.items || [];
+      try {
+        const response = await api.get('/videos?limit=5');
+        if (Array.isArray(response.data)) {
+          return response.data;
+        }
+        if (response.data && Array.isArray(response.data.items)) {
+          return response.data.items;
+        }
+        return [];
+      } catch (err) {
+        console.error('Failed to fetch recent videos for dashboard:', err);
+        return [];
+      }
     }
   });
 
@@ -75,7 +86,11 @@ export const Dashboard: React.FC = () => {
           <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md">
             <h3 className="font-bold text-slate-200 text-lg mb-6">Recent Video Ingestions</h3>
             <div className="divide-y divide-dark-border">
-              {recentVideos && recentVideos.length > 0 ? (
+              {videosLoading ? (
+                <div className="text-center py-8 text-slate-500 text-sm animate-pulse">
+                  Loading recent surveillance feeds...
+                </div>
+              ) : recentVideos && recentVideos.length > 0 ? (
                 recentVideos.map((vid: any) => (
                   <div key={vid.id} className="py-4 flex items-center justify-between first:pt-0 last:pb-0">
                     <div>

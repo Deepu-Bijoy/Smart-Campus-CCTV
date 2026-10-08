@@ -33,6 +33,7 @@ import asyncio
 from app.main import app
 from app.api import deps
 from app.models.user import User
+from app.models.camera import Camera
 from app.db.session import engine
 from app.db.base_class import Base
 from app.pipeline.x3d_violence_detector import X3DViolenceDetector, detect_video_violence
@@ -47,9 +48,31 @@ mock_user = User(
 )
 app.dependency_overrides[deps.get_current_user] = lambda: mock_user
 
+mock_camera = Camera(
+    id=uuid.UUID("c1d2e3f4-a5b6-7890-1234-567890abcdef"),
+    name="X3D Workflow Test Camera",
+    building="North Block",
+    floor=1,
+    location="Main Courtyard",
+    direction="North",
+    resolution="1920x1080",
+    status="active"
+)
+
 async def async_setup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    from app.db.session import SessionLocal
+    from sqlalchemy import select
+    async with SessionLocal() as session:
+        existing = await session.execute(select(User).filter(User.id == mock_user.id))
+        if not existing.scalar_one_or_none():
+            session.add(mock_user)
+            await session.commit()
+        existing_cam = await session.execute(select(Camera).filter(Camera.id == mock_camera.id))
+        if not existing_cam.scalar_one_or_none():
+            session.add(mock_camera)
+            await session.commit()
 
 
 def create_synthetic_cctv_video(file_path: str, duration_sec: float = 4.0, fps: float = 20.0, add_motion: bool = False):
@@ -152,7 +175,7 @@ def test_api_upload_and_analyze_pipeline():
         up_res = client.post(
             "/api/v1/violence/upload",
             files={"file": ("x3d_api_test.mp4", vf, "video/mp4")},
-            data={"title": "X3D Test Video"}
+            data={"title": "X3D Test Video", "camera_id": str(mock_camera.id)}
         )
 
     assert up_res.status_code == 201, f"Upload failed with {up_res.status_code}: {up_res.text}"
@@ -189,7 +212,7 @@ def test_x3d_violence_detected_segment_workflow():
         up_res = client.post(
             "/api/v1/violence/upload",
             files={"file": ("x3d_fight_event.mp4", vf, "video/mp4")},
-            data={"title": "Campus Fight Segment CCTV"}
+            data={"title": "Campus Fight Segment CCTV", "camera_id": str(mock_camera.id)}
         )
 
     assert up_res.status_code == 201

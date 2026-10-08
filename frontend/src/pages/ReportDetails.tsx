@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
@@ -12,12 +12,16 @@ import {
   AlertTriangle, 
   Image as ImageIcon, 
   Video as VideoIcon,
-  Target 
+  Target,
+  Loader2
 } from 'lucide-react';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const ReportDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [downloadingFormat, setDownloadingFormat] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   const { data: report, isLoading } = useQuery({
     queryKey: ['report-detail', id],
@@ -27,9 +31,56 @@ export const ReportDetails: React.FC = () => {
     }
   });
 
-  const handleDownload = (format: string) => {
-    const downloadUrl = `${api.defaults.baseURL}/reports/download/${id}?format=${format}`;
-    window.open(downloadUrl, '_blank');
+  const handleDownload = async (format: string) => {
+    if (downloadingFormat || !id) return;
+    setDownloadingFormat(format);
+    setDownloadError(null);
+
+    try {
+      const response = await api.get(`/reports/download/${id}`, {
+        params: { format },
+        responseType: 'blob'
+      });
+
+      let filename = `${(report?.title || 'report').toLowerCase().replace(/\s+/g, '_')}.${format === 'json' ? 'json' : 'html'}`;
+      const disposition = response.headers['content-disposition'];
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (match && match[1]) {
+          filename = match[1].replace(/['"]/g, '');
+        }
+      }
+
+      const mimeType = format === 'json' ? 'application/json' : 'text/html';
+      const blob = new Blob([response.data], { type: mimeType });
+      const blobUrl = window.URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      window.URL.revokeObjectURL(blobUrl);
+    } catch (err: any) {
+      console.error('Failed to download report:', err);
+      let errMsg = 'Failed to download report file. Please verify permissions.';
+      if (err.response?.status === 401) {
+        errMsg = 'Session expired or not authenticated. Please log in again.';
+      } else if (err.response?.status === 403) {
+        errMsg = 'You do not have permission to download this report.';
+      } else if (err.response?.status === 404) {
+        errMsg = 'Report download file not found.';
+      } else if (err.response?.data?.detail) {
+        errMsg = typeof err.response.data.detail === 'string' 
+          ? err.response.data.detail 
+          : JSON.stringify(err.response.data.detail);
+      }
+      setDownloadError(errMsg);
+    } finally {
+      setDownloadingFormat(null);
+    }
   };
 
   if (isLoading) {
@@ -69,21 +120,48 @@ export const ReportDetails: React.FC = () => {
           <span>Go Back</span>
         </button>
 
-        <div className="flex space-x-3">
-          <button
-            onClick={() => handleDownload('html')}
-            className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow-lg shadow-blue-500/15 cursor-pointer"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Download HTML/PDF</span>
-          </button>
-          <button
-            onClick={() => handleDownload('json')}
-            className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 px-4 py-2 rounded-xl text-xs font-bold transition border border-dark-border cursor-pointer"
-          >
-            <FileText className="h-3.5 w-3.5" />
-            <span>Export JSON</span>
-          </button>
+        <div className="flex flex-col items-end space-y-2">
+          <div className="flex space-x-3">
+            <button
+              onClick={() => handleDownload('html')}
+              disabled={Boolean(downloadingFormat)}
+              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow-lg shadow-blue-500/15 cursor-pointer disabled:cursor-not-allowed"
+            >
+              {downloadingFormat === 'html' ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Downloading HTML/PDF...</span>
+                </>
+              ) : (
+                <>
+                  <Download className="h-3.5 w-3.5" />
+                  <span>Download HTML/PDF</span>
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => handleDownload('json')}
+              disabled={Boolean(downloadingFormat)}
+              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 px-4 py-2 rounded-xl text-xs font-bold transition border border-dark-border cursor-pointer disabled:cursor-not-allowed"
+            >
+              {downloadingFormat === 'json' ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>Exporting JSON...</span>
+                </>
+              ) : (
+                <>
+                  <FileText className="h-3.5 w-3.5" />
+                  <span>Export JSON</span>
+                </>
+              )}
+            </button>
+          </div>
+          {downloadError && (
+            <span className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-1 rounded-lg">
+              {downloadError}
+            </span>
+          )}
         </div>
       </div>
 
@@ -178,7 +256,7 @@ export const ReportDetails: React.FC = () => {
                   <div className="space-y-2">
                     <span className="text-xs text-slate-400 font-semibold uppercase">[Detected Evidence Frame]</span>
                     <div className="rounded-xl overflow-hidden border border-dark-border bg-slate-950 aspect-video">
-                      <img
+                      <AuthenticatedImage
                         src={evidenceInfo.evidence_image}
                         alt="Detected Evidence Frame"
                         className="w-full h-full object-cover"
@@ -235,7 +313,7 @@ export const ReportDetails: React.FC = () => {
                           <td className="py-3 px-4">
                             <div className="w-10 h-10 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center">
                               {s.profile_photo_url ? (
-                                <img src={s.profile_photo_url} alt={s.name} className="w-full h-full object-cover" />
+                                <AuthenticatedImage src={s.profile_photo_url} alt={s.name} className="w-full h-full object-cover" />
                               ) : (
                                 <Users className="h-4 w-4 text-slate-500" />
                               )}

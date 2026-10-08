@@ -34,6 +34,14 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def get_current_user(
     db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme)
 ) -> User:
+    from app.core import security
+    if security.is_token_revoked(token):
+        logger.warning("Dependency get_current_user: Revoked token presented.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+        )
+
     try:
         payload = jwt.decode(
             token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM]
@@ -45,14 +53,14 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
         )
-    
+
     if not token_data.sub:
         logger.warning("Dependency get_current_user: Token subject missing.")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
         )
-        
+
     try:
         result = await db.execute(select(User).filter(User.id == uuid.UUID(token_data.sub)))
         user = result.scalars().first()
@@ -62,7 +70,7 @@ async def get_current_user(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database connection error",
         )
-    
+
     if not user:
         logger.warning(f"Dependency get_current_user: User with ID {token_data.sub} not found in database.")
         raise HTTPException(
@@ -77,3 +85,18 @@ async def get_current_user(
         )
     logger.debug(f"Dependency get_current_user: Validated active user {user.email}")
     return user
+
+def require_roles(allowed_roles: list):
+    async def role_checker(current_user: User = Depends(get_current_user)) -> User:
+        user_role = (current_user.role or "").lower()
+        if user_role not in [r.lower() for r in allowed_roles]:
+            logger.warning(f"Access denied for user {current_user.email} (role: {user_role}). Required: {allowed_roles}")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not enough permissions for this operation",
+            )
+        return current_user
+    return role_checker
+
+require_admin = require_roles(["admin"])
+require_operator = require_roles(["admin", "operator"])

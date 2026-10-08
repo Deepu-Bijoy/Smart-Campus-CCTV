@@ -14,6 +14,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const Search: React.FC = () => {
   const [query, setQuery] = useState('');
@@ -376,13 +377,10 @@ export const Search: React.FC = () => {
                         )}
                       </div>
                       <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950 flex justify-center">
-                        <img
-                          src={`${API_URL}${selectedResult.evidence.image}`}
+                        <AuthenticatedImage
+                          src={selectedResult.evidence.image}
                           alt="Screenshot Crop"
                           className="max-h-48 object-contain"
-                          onError={(e: any) => {
-                            e.target.src = '/storage/crops/simulated_face.jpg';
-                          }}
                         />
                       </div>
                     </div>

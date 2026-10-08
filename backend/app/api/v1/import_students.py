@@ -174,7 +174,20 @@ async def import_students_photos_dataset(
     os.makedirs(temp_dir, exist_ok=True)
     try:
         with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
+            abs_target_dir = os.path.abspath(temp_dir)
+            for member in zip_ref.infolist():
+                target_path = os.path.abspath(os.path.join(abs_target_dir, member.filename))
+                if os.path.commonpath([abs_target_dir, target_path]) != abs_target_dir:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Security violation: Archive member '{member.filename}' attempts path traversal."
+                    )
             zip_ref.extractall(temp_dir)
+    except HTTPException:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        if os.path.exists(temp_zip_path):
+            os.remove(temp_zip_path)
+        raise
     except Exception as e:
         shutil.rmtree(temp_dir, ignore_errors=True)
         if os.path.exists(temp_zip_path):

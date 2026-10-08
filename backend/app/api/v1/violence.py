@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
@@ -70,15 +71,15 @@ async def _get_student_profile_photo_url(db: AsyncSession, student_id: uuid.UUID
 def check_video_integrity(file_path: str) -> tuple[bool, Optional[str]]:
     if not os.path.exists(file_path):
         return False, "File was not saved properly on server disk."
-    
+
     if os.path.getsize(file_path) == 0:
         return False, "Video file is empty (0 bytes)."
-        
+
     try:
         cap = cv2.VideoCapture(file_path)
         if not cap.isOpened():
             return False, "Corrupted or invalid video stream. OpenCV could not open container."
-        
+
         ret, frame = cap.read()
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -86,7 +87,7 @@ def check_video_integrity(file_path: str) -> tuple[bool, Optional[str]]:
 
         if not ret or frame is None or width <= 0 or height <= 0:
             return False, "Corrupted or unreadable video file. Video stream has no decodable frames."
-            
+
         return True, None
     except Exception as e:
         return False, f"Error inspecting video codec/stream: {str(e)}"
@@ -108,7 +109,7 @@ async def upload_violence_video(
     os.makedirs(settings.STORAGE_DIR, exist_ok=True)
     original_filename = os.path.basename(file.filename or "unknown_cctv.mp4")
     file_extension = os.path.splitext(original_filename)[1].lower()
-    
+
     # 1. Validate File Type
     if file_extension not in [".mp4", ".avi", ".mkv", ".mov"]:
         raise HTTPException(
@@ -120,7 +121,7 @@ async def upload_violence_video(
     saved_filename = f"{file_id}{file_extension}"
     saved_path = os.path.join(settings.STORAGE_DIR, saved_filename)
     resolved_title = title if title else f"Violence Analysis - {os.path.splitext(original_filename)[0]}"
-    
+
     # 2. Validate File Size & Save Stream
     try:
         total_size = 0
@@ -378,279 +379,297 @@ async def analyze_video_for_violence(
     target_video.progress_percentage = 30
     await db.commit()
 
-    # Step 1: Run Pretrained X3D-M Video Temporal Model
-    t_x3d_load_start = time.time()
-    x3d_detector = X3DViolenceDetector()
-    t_x3d_load = time.time() - t_x3d_load_start
+    try:
+        # Step 1: Run Pretrained X3D-M Video Temporal Model
+        t_x3d_load_start = time.time()
+        x3d_detector = X3DViolenceDetector()
+        t_x3d_load = time.time() - t_x3d_load_start
 
-    x3d_res = x3d_detector.detect_violence(
-        target_video.file_path,
-        window_duration_sec=2.0,
-        stride_sec=1.0,
-        threshold=0.4,
-        context_margin_sec=1.0
-    )
+        x3d_res = x3d_detector.detect_violence(
+            target_video.file_path,
+            window_duration_sec=2.0,
+            stride_sec=1.0,
+            threshold=0.4,
+            context_margin_sec=1.0
+        )
 
-    logger.info(f"[X3D] Model loading: {t_x3d_load:.3f} sec")
-    logger.info(f"[X3D] Video preprocessing: {x3d_res.timings.get('video_preprocessing_sec', 0.0):.3f} sec")
-    logger.info(f"[X3D] Violence inference: {x3d_res.timings.get('violence_inference_sec', 0.0):.3f} sec")
-    logger.info(f"[X3D] Segment extraction: {x3d_res.timings.get('segment_extraction_sec', 0.0):.3f} sec")
+        logger.info(f"[X3D] Model loading: {t_x3d_load:.3f} sec")
+        logger.info(f"[X3D] Video preprocessing: {x3d_res.timings.get('video_preprocessing_sec', 0.0):.3f} sec")
+        logger.info(f"[X3D] Violence inference: {x3d_res.timings.get('violence_inference_sec', 0.0):.3f} sec")
+        logger.info(f"[X3D] Segment extraction: {x3d_res.timings.get('segment_extraction_sec', 0.0):.3f} sec")
 
-    if not x3d_res.is_violent or len(x3d_res.segments) == 0:
-        # Video classified as Normal campus activity — no violence detected
-        logger.info("[YOLO] Processing: 0.000 sec")
-        logger.info("[ByteTrack] Processing: 0.000 sec")
-        logger.info("[ArcFace] Processing: 0.000 sec")
-        logger.info("[Evidence] Generation: 0.000 sec")
-        logger.info("[DB] Persistence: 0.000 sec")
-        logger.info(f"[TOTAL] {time.time() - t_total_start:.3f} sec")
+        if not x3d_res.is_violent or len(x3d_res.segments) == 0:
+            # Video classified as Normal campus activity — no violence detected
+            logger.info("[YOLO] Processing: 0.000 sec")
+            logger.info("[ByteTrack] Processing: 0.000 sec")
+            logger.info("[ArcFace] Processing: 0.000 sec")
+            logger.info("[Evidence] Generation: 0.000 sec")
+            logger.info("[DB] Persistence: 0.000 sec")
+            logger.info(f"[TOTAL] {time.time() - t_total_start:.3f} sec")
 
-        target_video.status = "completed"
-        target_video.current_stage = "Analysis Completed - Normal Activity"
-        target_video.progress_percentage = 100
+            target_video.status = "completed"
+            target_video.current_stage = "Analysis Completed - Normal Activity"
+            target_video.progress_percentage = 100
+            await db.commit()
+            return await _compile_violence_dossier(db, target_video, resolved_camera)
+
+        # Step 2: Violence Detected — Process ONLY detected violence segments downstream
+        target_video.current_stage = "Processing Violence Segments (YOLOv8 & ByteTrack)"
+        target_video.progress_percentage = 60
         await db.commit()
-        return await _compile_violence_dossier(db, target_video, resolved_camera)
 
-    # Step 2: Violence Detected — Process ONLY detected violence segments downstream
-    target_video.current_stage = "Processing Violence Segments (YOLOv8 & ByteTrack)"
-    target_video.progress_percentage = 60
-    await db.commit()
+        yolo_detector = YOLOv8Detector()
+        tracker = ByteTrackTracker()
+        identifier = StudentIdentifier()
 
-    yolo_detector = YOLOv8Detector()
-    tracker = ByteTrackTracker()
-    identifier = StudentIdentifier()
+        cap = cv2.VideoCapture(target_video.file_path)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+        if fps <= 0:
+            fps = 25.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        video_duration = target_video.duration or (total_frames / fps if fps > 0 else 0.0)
 
-    cap = cv2.VideoCapture(target_video.file_path)
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
-    if fps <= 0:
-        fps = 25.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    video_duration = target_video.duration or (total_frames / fps if fps > 0 else 0.0)
+        # Track-level identity cache to avoid redundant ArcFace calls
+        track_identity_cache: Dict[int, Optional[Dict[str, Any]]] = {}
 
-    # Track-level identity cache to avoid redundant ArcFace calls
-    track_identity_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        for seg_idx, seg in enumerate(x3d_res.segments):
+            seg_start_sec = max(0.0, seg.start_time)
+            seg_end_sec = min(video_duration, seg.end_time) if video_duration > 0 else seg.end_time
+            start_frame_idx = int(seg_start_sec * fps)
+            end_frame_idx = int(seg_end_sec * fps)
 
-    for seg_idx, seg in enumerate(x3d_res.segments):
-        seg_start_sec = max(0.0, seg.start_time)
-        seg_end_sec = min(video_duration, seg.end_time) if video_duration > 0 else seg.end_time
-        start_frame_idx = int(seg_start_sec * fps)
-        end_frame_idx = int(seg_end_sec * fps)
-
-        logger.info(
-            f"[VIOLENCE PIPELINE] Processing segment {seg_idx + 1}/{len(x3d_res.segments)}: "
-            f"{seg_start_sec:.2f}s to {seg_end_sec:.2f}s (frames {start_frame_idx}-{end_frame_idx})"
-        )
-
-        # 2a. Run YOLOv8 + ByteTrack only on the segment frames
-        t_yolo_start = time.time()
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
-        current_frame_idx = start_frame_idx
-
-        segment_tracks: Dict[int, Dict[str, Any]] = {}
-
-        while current_frame_idx <= end_frame_idx:
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                break
-
-            t_sec = current_frame_idx / fps
-
-            t_bt_start = time.time()
-            track_result = tracker.track_frame(yolo_detector, frame, persist=True)
-            t_bytetrack_total += (time.time() - t_bt_start)
-
-            if track_result is not None and track_result.boxes is not None:
-                boxes = track_result.boxes
-                for box in boxes:
-                    cls_id = int(box.cls[0].item())
-                    if cls_id != 0:  # Class 0: person
-                        continue
-
-                    conf = float(box.conf[0].item())
-                    xyxy = box.xyxy[0].cpu().numpy().tolist()
-                    tracker_id = int(box.id[0].item()) if box.id is not None else current_frame_idx
-
-                    # Crop person box
-                    h, w = frame.shape[:2]
-                    x1, y1, x2, y2 = map(int, xyxy)
-                    x1, y1 = max(0, x1), max(0, y1)
-                    x2, y2 = min(w, x2), min(h, y2)
-                    crop = frame[y1:y2, x1:x2] if (x2 > x1 and y2 > y1) else None
-
-                    if tracker_id not in segment_tracks:
-                        segment_tracks[tracker_id] = {
-                            "detections": [],
-                            "best_crop_path": None,
-                            "best_conf": 0.0,
-                            "start_time": t_sec,
-                            "end_time": t_sec,
-                        }
-
-                    trk_entry = segment_tracks[tracker_id]
-                    trk_entry["end_time"] = t_sec
-                    trk_entry["detections"].append({
-                        "frame_number": current_frame_idx,
-                        "timestamp_seconds": round(t_sec, 2),
-                        "bounding_box": [round(c, 1) for c in xyxy],
-                        "confidence": round(conf, 4)
-                    })
-
-                    # Save best crop for ArcFace biometric recognition
-                    if crop is not None and conf > trk_entry["best_conf"] and crop.shape[0] >= 40 and crop.shape[1] >= 20:
-                        trk_entry["best_conf"] = conf
-                        crop_filename = f"crop_seg_{seg_idx}_trk_{tracker_id}_{current_frame_idx}.jpg"
-                        crop_dir = os.path.join(settings.STORAGE_DIR, "crops")
-                        os.makedirs(crop_dir, exist_ok=True)
-                        crop_path = os.path.join(crop_dir, crop_filename)
-                        cv2.imwrite(crop_path, crop)
-                        trk_entry["best_crop_path"] = crop_path
-
-            current_frame_idx += 1
-
-        t_yolo_total += (time.time() - t_yolo_start)
-
-        # 2b. ArcFace Student Identification (only on segment tracks, with caching)
-        t_arc_start = time.time()
-        for trk_id, trk_data in segment_tracks.items():
-            if trk_id not in track_identity_cache:
-                matched_identity = None
-                crop_p = trk_data.get("best_crop_path")
-                if crop_p and os.path.exists(crop_p):
-                    try:
-                        match_res = await identifier.identify_face_in_crop(crop_p)
-                        if match_res and match_res.get("success") and match_res.get("student_id"):
-                            sim = match_res.get("similarity_score", 0.0)
-                            if sim >= 0.50:  # Safe threshold
-                                s_stmt = select(Student).filter(Student.id == match_res["student_id"])
-                                s_res = await db.execute(s_stmt)
-                                student_obj = s_res.scalars().first()
-                                if student_obj:
-                                    matched_identity = {
-                                        "student": student_obj,
-                                        "similarity_score": sim,
-                                        "confidence": match_res.get("confidence", "high"),
-                                    }
-                    except Exception as fe:
-                        logger.warning(f"[VIOLENCE PIPELINE] ArcFace matching error for track {trk_id}: {fe}")
-
-                track_identity_cache[trk_id] = matched_identity
-
-        t_arcface_total += (time.time() - t_arc_start)
-
-        # 2c. Evidence Generation
-        t_ev_start = time.time()
-        os.makedirs(os.path.join(settings.STORAGE_DIR, "evidence"), exist_ok=True)
-
-        mid_sec = (seg_start_sec + seg_end_sec) / 2.0
-        frame_filename = f"evidence_frame_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.jpg"
-        frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
-        extract_evidence_frame(target_video.file_path, mid_sec, frame_path)
-
-        clip_filename = f"clip_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.mp4"
-        clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
-        generate_subclip(target_video.file_path, seg_start_sec, seg.duration, clip_path)
-        t_evidence_total += (time.time() - t_ev_start)
-
-        # 2d. Database Persistence
-        t_db_start = time.time()
-        incident_id = uuid.uuid4()
-        inc_obj = Incident(
-            id=incident_id,
-            incident_type="Violence",
-            camera_id=resolved_camera.id,
-            confidence=seg.confidence,
-            timestamp=datetime.now(timezone.utc),
-            explanation=(
-                f"X3D-M video temporal model detected physical altercation from "
-                f"{seg.start_time:.1f}s to {seg.end_time:.1f}s "
-                f"(duration {seg.duration:.1f}s, confidence {seg.confidence * 100:.1f}%)."
+            logger.info(
+                f"[VIOLENCE PIPELINE] Processing segment {seg_idx + 1}/{len(x3d_res.segments)}: "
+                f"{seg_start_sec:.2f}s to {seg_end_sec:.2f}s (frames {start_frame_idx}-{end_frame_idx})"
             )
-        )
-        db.add(inc_obj)
 
-        det_event = DetectedEvent(
-            id=uuid.uuid4(),
-            video_id=target_video.id,
-            camera_id=resolved_camera.id,
-            incident_id=incident_id,
-            event_type="VIOLENCE",
-            confidence=seg.confidence,
-            timestamp=datetime.now(timezone.utc)
-        )
-        db.add(det_event)
+            # 2a. Run YOLOv8 + ByteTrack only on the segment frames
+            t_yolo_start = time.time()
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
+            current_frame_idx = start_frame_idx
 
-        if os.path.exists(frame_path):
-            db.add(Evidence(
+            segment_tracks: Dict[int, Dict[str, Any]] = {}
+
+            while current_frame_idx <= end_frame_idx:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+
+                t_sec = current_frame_idx / fps
+
+                t_bt_start = time.time()
+                track_result = tracker.track_frame(yolo_detector, frame, persist=True)
+                t_bytetrack_total += (time.time() - t_bt_start)
+
+                if track_result is not None and track_result.boxes is not None:
+                    boxes = track_result.boxes
+                    for box in boxes:
+                        cls_id = int(box.cls[0].item())
+                        if cls_id != 0:  # Class 0: person
+                            continue
+
+                        conf = float(box.conf[0].item())
+                        xyxy = box.xyxy[0].cpu().numpy().tolist()
+                        tracker_id = int(box.id[0].item()) if box.id is not None else current_frame_idx
+
+                        # Crop person box
+                        h, w = frame.shape[:2]
+                        x1, y1, x2, y2 = map(int, xyxy)
+                        x1, y1 = max(0, x1), max(0, y1)
+                        x2, y2 = min(w, x2), min(h, y2)
+                        crop = frame[y1:y2, x1:x2] if (x2 > x1 and y2 > y1) else None
+
+                        if tracker_id not in segment_tracks:
+                            segment_tracks[tracker_id] = {
+                                "detections": [],
+                                "best_crop_path": None,
+                                "best_conf": 0.0,
+                                "start_time": t_sec,
+                                "end_time": t_sec,
+                            }
+
+                        trk_entry = segment_tracks[tracker_id]
+                        trk_entry["end_time"] = t_sec
+                        trk_entry["detections"].append({
+                            "frame_number": current_frame_idx,
+                            "timestamp_seconds": round(t_sec, 2),
+                            "bounding_box": [round(c, 1) for c in xyxy],
+                            "confidence": round(conf, 4)
+                        })
+
+                        # Save best crop for ArcFace biometric recognition
+                        if crop is not None and conf > trk_entry["best_conf"] and crop.shape[0] >= 40 and crop.shape[1] >= 20:
+                            trk_entry["best_conf"] = conf
+                            crop_filename = f"crop_seg_{seg_idx}_trk_{tracker_id}_{current_frame_idx}.jpg"
+                            crop_dir = os.path.join(settings.STORAGE_DIR, "crops")
+                            os.makedirs(crop_dir, exist_ok=True)
+                            crop_path = os.path.join(crop_dir, crop_filename)
+                            cv2.imwrite(crop_path, crop)
+                            trk_entry["best_crop_path"] = crop_path
+
+                current_frame_idx += 1
+
+            t_yolo_total += (time.time() - t_yolo_start)
+
+            # 2b. ArcFace Student Identification (only on segment tracks, with caching)
+            t_arc_start = time.time()
+            for trk_id, trk_data in segment_tracks.items():
+                if trk_id not in track_identity_cache:
+                    matched_identity = None
+                    crop_p = trk_data.get("best_crop_path")
+                    if crop_p and os.path.exists(crop_p):
+                        try:
+                            match_res = await identifier.identify_face_in_crop(crop_p)
+                            if match_res and match_res.get("success") and match_res.get("student_id"):
+                                sim = match_res.get("similarity_score", 0.0)
+                                if sim >= 0.50:  # Safe threshold
+                                    s_stmt = select(Student).filter(Student.id == match_res["student_id"])
+                                    s_res = await db.execute(s_stmt)
+                                    student_obj = s_res.scalars().first()
+                                    if student_obj:
+                                        matched_identity = {
+                                            "student": student_obj,
+                                            "similarity_score": sim,
+                                            "confidence": match_res.get("confidence", "high"),
+                                        }
+                        except Exception as fe:
+                            logger.warning(f"[VIOLENCE PIPELINE] ArcFace matching error for track {trk_id}: {fe}")
+
+                    track_identity_cache[trk_id] = matched_identity
+
+            t_arcface_total += (time.time() - t_arc_start)
+
+            # 2c. Evidence Generation
+            t_ev_start = time.time()
+            os.makedirs(os.path.join(settings.STORAGE_DIR, "evidence"), exist_ok=True)
+
+            mid_sec = (seg_start_sec + seg_end_sec) / 2.0
+            frame_filename = f"evidence_frame_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.jpg"
+            frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
+            extract_evidence_frame(target_video.file_path, mid_sec, frame_path)
+
+            clip_filename = f"clip_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.mp4"
+            clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
+            generate_subclip(target_video.file_path, seg_start_sec, seg.duration, clip_path)
+            t_evidence_total += (time.time() - t_ev_start)
+
+            # 2d. Database Persistence
+            t_db_start = time.time()
+            incident_id = uuid.uuid4()
+            inc_obj = Incident(
+                id=incident_id,
+                incident_type="Violence",
+                camera_id=resolved_camera.id,
+                confidence=seg.confidence,
+                timestamp=datetime.now(timezone.utc),
+                explanation=(
+                    f"X3D-M video temporal model detected physical altercation from "
+                    f"{seg.start_time:.1f}s to {seg.end_time:.1f}s "
+                    f"(duration {seg.duration:.1f}s, confidence {seg.confidence * 100:.1f}%)."
+                )
+            )
+            db.add(inc_obj)
+
+            det_event = DetectedEvent(
                 id=uuid.uuid4(),
-                incident_id=incident_id,
-                evidence_type="screenshot",
-                file_path=frame_path,
-                timestamp=datetime.now(timezone.utc)
-            ))
-        if os.path.exists(clip_path):
-            db.add(Evidence(
-                id=uuid.uuid4(),
-                incident_id=incident_id,
-                evidence_type="video",
-                file_path=clip_path,
-                timestamp=datetime.now(timezone.utc)
-            ))
-
-        for trk_id, trk_data in segment_tracks.items():
-            t_uuid = uuid.uuid4()
-            id_info = track_identity_cache.get(trk_id)
-            matched_sid = id_info["student"].id if id_info else None
-
-            db_track = Track(
-                id=t_uuid,
                 video_id=target_video.id,
-                object_class="person",
-                tracker_id=trk_id,
-                start_time=trk_data["start_time"],
-                end_time=trk_data["end_time"],
-                identified_student_id=matched_sid,
-                key_frame_path=trk_data.get("best_crop_path")
+                camera_id=resolved_camera.id,
+                incident_id=incident_id,
+                event_type="VIOLENCE",
+                confidence=seg.confidence,
+                timestamp=datetime.now(timezone.utc)
             )
-            db.add(db_track)
+            db.add(det_event)
 
-            for d in trk_data["detections"]:
-                db.add(Detection(
-                    id=uuid.uuid4(),
-                    track_id=t_uuid,
-                    frame_number=d["frame_number"],
-                    timestamp_seconds=d["timestamp_seconds"],
-                    bounding_box=d["bounding_box"],
-                    confidence=d["confidence"]
-                ))
-
-            if id_info:
-                db.add(IncidentPerson(
+            if os.path.exists(frame_path):
+                db.add(Evidence(
                     id=uuid.uuid4(),
                     incident_id=incident_id,
-                    student_id=matched_sid,
-                    confidence=id_info["similarity_score"]
+                    evidence_type="screenshot",
+                    file_path=frame_path,
+                    timestamp=datetime.now(timezone.utc)
+                ))
+            if os.path.exists(clip_path):
+                db.add(Evidence(
+                    id=uuid.uuid4(),
+                    incident_id=incident_id,
+                    evidence_type="video",
+                    file_path=clip_path,
+                    timestamp=datetime.now(timezone.utc)
                 ))
 
+            for trk_id, trk_data in segment_tracks.items():
+                t_uuid = uuid.uuid4()
+                id_info = track_identity_cache.get(trk_id)
+                matched_sid = id_info["student"].id if id_info else None
+
+                db_track = Track(
+                    id=t_uuid,
+                    video_id=target_video.id,
+                    object_class="person",
+                    tracker_id=trk_id,
+                    start_time=trk_data["start_time"],
+                    end_time=trk_data["end_time"],
+                    identified_student_id=matched_sid,
+                    key_frame_path=trk_data.get("best_crop_path")
+                )
+                db.add(db_track)
+
+                for d in trk_data["detections"]:
+                    db.add(Detection(
+                        id=uuid.uuid4(),
+                        track_id=t_uuid,
+                        frame_number=d["frame_number"],
+                        timestamp_seconds=d["timestamp_seconds"],
+                        bounding_box=d["bounding_box"],
+                        confidence=d["confidence"]
+                    ))
+
+                if id_info:
+                    db.add(IncidentPerson(
+                        id=uuid.uuid4(),
+                        incident_id=incident_id,
+                        student_id=matched_sid,
+                        confidence=id_info["similarity_score"]
+                    ))
+
+            await db.commit()
+            t_db_total += (time.time() - t_db_start)
+
+        cap.release()
+
+        # Step 3: Complete timing instrumentation
+        t_total = time.time() - t_total_start
+        logger.info(f"[YOLO] Processing: {t_yolo_total:.3f} sec")
+        logger.info(f"[ByteTrack] Processing: {t_bytetrack_total:.3f} sec")
+        logger.info(f"[ArcFace] Processing: {t_arcface_total:.3f} sec")
+        logger.info(f"[Evidence] Generation: {t_evidence_total:.3f} sec")
+        logger.info(f"[DB] Persistence: {t_db_total:.3f} sec")
+        logger.info(f"[TOTAL] {t_total:.3f} sec")
+
+        target_video.status = "completed"
+        target_video.current_stage = "Violence Analysis Completed"
+        target_video.progress_percentage = 100
         await db.commit()
-        t_db_total += (time.time() - t_db_start)
 
-    cap.release()
-
-    # Step 3: Complete timing instrumentation
-    t_total = time.time() - t_total_start
-    logger.info(f"[YOLO] Processing: {t_yolo_total:.3f} sec")
-    logger.info(f"[ByteTrack] Processing: {t_bytetrack_total:.3f} sec")
-    logger.info(f"[ArcFace] Processing: {t_arcface_total:.3f} sec")
-    logger.info(f"[Evidence] Generation: {t_evidence_total:.3f} sec")
-    logger.info(f"[DB] Persistence: {t_db_total:.3f} sec")
-    logger.info(f"[TOTAL] {t_total:.3f} sec")
-
-    target_video.status = "completed"
-    target_video.current_stage = "Violence Analysis Completed"
-    target_video.progress_percentage = 100
-    await db.commit()
-
-    return await _compile_violence_dossier(db, target_video, resolved_camera)
+        return await _compile_violence_dossier(db, target_video, resolved_camera)
+    except Exception as exc:
+        logger.error(f'[VIOLENCE PIPELINE] Analysis failed for video {target_video.id}: {str(exc)}', exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        try:
+            target_video.status = 'failed'
+            target_video.current_stage = 'Analysis Failed'
+            target_video.error_message = f'Violence detection failed: {str(exc)}'[:1024]
+            target_video.processing_finished_at = datetime.now(timezone.utc)
+            db.add(target_video)
+            await db.commit()
+        except Exception as db_err:
+            logger.error(f'[VIOLENCE PIPELINE] Failed to persist failed video status: {db_err}')
+            await db.rollback()
+        raise
 
 async def _compile_violence_dossier(
     db: AsyncSession,
@@ -688,20 +707,36 @@ async def _compile_violence_dossier(
         if inc.confidence > max_confidence:
             max_confidence = inc.confidence
 
-        det_event = next((e for e in inc.events if e.video_id == target_video.id), None)
-        timestamp_sec = 0.0
-        if det_event and det_event.timestamp and target_video.created_at:
-            t_evt = det_event.timestamp.replace(tzinfo=None) if hasattr(det_event.timestamp, "tzinfo") and det_event.timestamp.tzinfo else det_event.timestamp
-            t_vid = target_video.created_at.replace(tzinfo=None) if hasattr(target_video.created_at, "tzinfo") and target_video.created_at.tzinfo else target_video.created_at
-            delta = (t_evt - t_vid).total_seconds()
-            timestamp_sec = max(0.0, delta)
+        # DEFECT-DB-03 Remediation: Derive segment timing strictly from video-relative
+        # X3D-M temporal segment bounds rather than wall-clock processing latency.
+        seg_start_extracted = None
+        seg_end_extracted = None
+        seg_dur_extracted = None
+        if inc.explanation:
+            t_range_match = re.search(
+                r"altercation from\s*([0-9]+(?:\.[0-9]+)?)s\s*to\s*([0-9]+(?:\.[0-9]+)?)s",
+                inc.explanation
+            )
+            if t_range_match:
+                seg_start_extracted = float(t_range_match.group(1))
+                seg_end_extracted = float(t_range_match.group(2))
+                seg_dur_extracted = max(0.1, round(seg_end_extracted - seg_start_extracted, 1))
+            else:
+                t_single_match = re.search(r"altercation (?:at|from)\s*([0-9]+(?:\.[0-9]+)?)s", inc.explanation)
+                if t_single_match:
+                    seg_start_extracted = float(t_single_match.group(1))
 
-        if timestamp_sec == 0.0 and inc.explanation:
-            t_match = re.search(r"altercation from\s*([0-9]+(?:\.[0-9]+)?)s", inc.explanation)
-            if not t_match:
-                t_match = re.search(r"altercation at\s*([0-9]+(?:\.[0-9]+)?)s", inc.explanation)
-            if t_match:
-                timestamp_sec = float(t_match.group(1))
+        det_event = next((e for e in inc.events if e.video_id == target_video.id), None)
+
+        if seg_start_extracted is not None:
+            timestamp_sec = seg_start_extracted
+        else:
+            # Fallback for legacy events without temporal range in explanation
+            timestamp_sec = 0.0
+            if det_event and det_event.timestamp and target_video.created_at:
+                t_evt = det_event.timestamp.replace(tzinfo=None) if hasattr(det_event.timestamp, "tzinfo") and det_event.timestamp.tzinfo else det_event.timestamp
+                t_vid = target_video.created_at.replace(tzinfo=None) if hasattr(target_video.created_at, "tzinfo") and target_video.created_at.tzinfo else target_video.created_at
+                timestamp_sec = max(0.0, (t_evt - t_vid).total_seconds())
 
         # Parse evidence media URLs
         seg_image = None
@@ -805,15 +840,28 @@ async def _compile_violence_dossier(
             temporal_persistence=min(1.0, temporal_score)
         )
 
-        start_t = max(0.0, timestamp_sec - 2.5)
-        duration = 6.0
-        if target_video.duration and target_video.duration > 0:
-            end_t = min(target_video.duration, start_t + duration)
-            if start_t >= end_t:
-                start_t = max(0.0, end_t - min(6.0, target_video.duration))
-            duration = max(0.1, round(end_t - start_t, 1))
+        if seg_start_extracted is not None and seg_end_extracted is not None:
+            start_t = seg_start_extracted
+            end_t = seg_end_extracted
+            duration = seg_dur_extracted or max(0.1, round(end_t - start_t, 1))
+        elif seg_start_extracted is not None:
+            start_t = seg_start_extracted
+            duration = 6.0
+            if target_video.duration and target_video.duration > 0:
+                end_t = min(target_video.duration, start_t + duration)
+                duration = max(0.1, round(end_t - start_t, 1))
+            else:
+                end_t = start_t + duration
         else:
-            end_t = start_t + duration
+            start_t = max(0.0, timestamp_sec - 2.5)
+            duration = 6.0
+            if target_video.duration and target_video.duration > 0:
+                end_t = min(target_video.duration, start_t + duration)
+                if start_t >= end_t:
+                    start_t = max(0.0, end_t - min(6.0, target_video.duration))
+                duration = max(0.1, round(end_t - start_t, 1))
+            else:
+                end_t = start_t + duration
 
         def _format_time_hms(s_val: float) -> str:
             secs = int(max(0.0, s_val))
@@ -830,7 +878,7 @@ async def _compile_violence_dossier(
         for evt in inc.events:
             if evt.track_id:
                 associated_track_ids.add(evt.track_id)
-                
+
         trk_stmt = (
             select(Track)
             .options(selectinload(Track.detections))
@@ -841,14 +889,14 @@ async def _compile_violence_dossier(
         )
         trk_res = await db.execute(trk_stmt)
         all_video_tracks = trk_res.scalars().all()
-        
+
         for trk in all_video_tracks:
             in_window = not (trk.end_time < start_t or trk.start_time > end_t)
             is_linked = trk.id in associated_track_ids
             if in_window or is_linked:
                 window_dets = [d for d in trk.detections if (start_t <= d.timestamp_seconds <= end_t)]
                 rep_det = window_dets[0] if window_dets else (trk.detections[0] if trk.detections else None)
-                
+
                 crop_url = _clean_storage_url(trk.key_frame_path) if trk.key_frame_path else None
                 if not crop_url:
                     reid_stmt = (
@@ -860,7 +908,7 @@ async def _compile_violence_dossier(
                     reid_obj = reid_res.scalars().first()
                     if reid_obj and reid_obj.crop_path:
                         crop_url = _clean_storage_url(reid_obj.crop_path)
-                
+
                 if not crop_url and rep_det and target_video.file_path and os.path.exists(target_video.file_path):
                     try:
                         cap = cv2.VideoCapture(target_video.file_path)
@@ -884,7 +932,7 @@ async def _compile_violence_dossier(
                                 crop_url = _clean_storage_url(c_path)
                     except Exception as e:
                         logger.warning(f"Failed to generate on-demand crop for track {trk.id}: {str(e)}")
-                        
+
                 face_visible = False
                 disk_crop_path = trk.key_frame_path
                 if disk_crop_path and os.path.exists(disk_crop_path):
@@ -900,7 +948,7 @@ async def _compile_violence_dossier(
                                 face_visible = len(faces) > 0
                     except Exception:
                         face_visible = False
-                        
+
                 matched_student = None
                 id_confidence = "unidentified"
                 sim_score = 0.0
@@ -983,7 +1031,7 @@ async def _compile_violence_dossier(
                     if not any(s.student_id == matched_student.id for s in seg_students if s.student_id):
                         seg_students.append(student_card)
                     all_identified_students_map[matched_student.id] = student_card
-                    
+
                     # Ensure IncidentPerson record in DB
                     ip_check = await db.execute(
                         select(IncidentPerson).filter(
@@ -1115,7 +1163,7 @@ async def get_violence_video_status(
     """
     v_res = await db.execute(select(Video).filter(Video.id == video_id))
     video = v_res.scalars().first()
-    if not video:
+    if not video or (video.uploaded_by != current_user.id and (current_user.role or "").lower() != "admin"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Video {video_id} not found.")
     return {
         "video_id": str(video.id),
@@ -1140,9 +1188,9 @@ async def get_violence_analysis_result(
         .filter(Video.id == video_id)
     )
     video = v_res.scalars().first()
-    if not video:
+    if not video or (video.uploaded_by != current_user.id and (current_user.role or "").lower() != "admin"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Video {video_id} not found.")
-    
+
     return await _compile_violence_dossier(db, video, video.camera)
 
 @router.get("/history", response_model=List[dict])
@@ -1171,7 +1219,7 @@ async def list_violence_history(
         cam_name = inc.camera.name if inc.camera else "CCTV Camera"
         cam_loc = inc.camera.location if inc.camera else "Campus"
         students = [ip.student.name for ip in inc.persons if ip.student]
-        
+
         output.append({
             "incident_id": str(inc.id),
             "timestamp": inc.timestamp.isoformat(),
@@ -1370,17 +1418,56 @@ async def generate_violence_report(
         "generated_at": datetime.now(timezone.utc).isoformat()
     }
 
+    # Check for existing report for this incident
+    stmt = select(Report).filter(Report.incident_id == inc.id)
+    res = await db.execute(stmt)
+    existing_rep = res.scalars().first()
+    if existing_rep:
+        logger.info(f"Report for violence incident {inc.id} already exists (id={existing_rep.id}). Returning existing report.")
+        return {
+            "success": True,
+            "report_id": str(existing_rep.id),
+            "title": existing_rep.title,
+            "created_at": existing_rep.created_at.isoformat(),
+            "incident_id": str(inc.id),
+            "event_id": str(det_event.id) if det_event else str(inc.id),
+            "data": existing_rep.data
+        }
+
     report_obj = Report(
         id=uuid.uuid4(),
         title=report_title,
         incident_type="Violence",
+        incident_id=inc.id,
         student_id=primary_student_id,
         created_at=datetime.now(timezone.utc),
         data=report_data
     )
     db.add(report_obj)
-    await db.commit()
-    await db.refresh(report_obj)
+    try:
+        await db.commit()
+        await db.refresh(report_obj)
+    except IntegrityError as exc:
+        await db.rollback()
+        # Concurrent race: fetch report created by winning concurrent transaction
+        stmt = select(Report).filter(Report.incident_id == inc.id)
+        res = await db.execute(stmt)
+        existing_rep = res.scalars().first()
+        if existing_rep:
+            logger.info(
+                f"Concurrent race resolved: Report for violence incident {inc.id} "
+                f"already created (id={existing_rep.id}). Returning existing report."
+            )
+            return {
+                "success": True,
+                "report_id": str(existing_rep.id),
+                "title": existing_rep.title,
+                "created_at": existing_rep.created_at.isoformat(),
+                "incident_id": str(inc.id),
+                "event_id": str(det_event.id) if det_event else str(inc.id),
+                "data": existing_rep.data
+            }
+        raise exc
 
     return {
         "success": True,
