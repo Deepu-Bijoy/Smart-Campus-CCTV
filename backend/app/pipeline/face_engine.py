@@ -79,19 +79,21 @@ class FaceEnrollmentEngine:
             faces = []
             y_offset = 0
             
-            # Task 3: For CCTV person crops, extract upper body / head region (top 45%) first
+            # Task 3: For CCTV person crops, extract upper body / head region (top 55%) only if full-body aspect ratio
             if is_cctv:
                 h, w = img.shape[:2]
-                head_region_h = max(20, int(0.45 * h))
-                head_crop = img[0:head_region_h, 0:w]
-                if head_crop.size > 0:
-                    head_faces = self.model.get(head_crop)
-                    if head_faces and len(head_faces) > 0:
-                        faces = head_faces
-                        y_offset = 0
-                        logger.info(f"Face Engine: Upper body/head region detection succeeded ({len(faces)} face(s)).")
+                aspect_ratio = h / max(1, w)
+                if aspect_ratio > 1.3:
+                    head_region_h = max(20, int(0.55 * h))
+                    head_crop = img[0:head_region_h, 0:w]
+                    if head_crop.size > 0:
+                        head_faces = self.model.get(head_crop)
+                        if head_faces and len(head_faces) > 0:
+                            faces = head_faces
+                            y_offset = 0
+                            logger.info(f"Face Engine: Upper body/head region detection succeeded ({len(faces)} face(s)).")
             
-            # Fallback to full crop if upper body crop detection returned no faces
+            # Fallback to full image if upper body crop detection returned no faces or if image is already a face crop
             if len(faces) == 0:
                 faces = self.model.get(img)
                 y_offset = 0

@@ -26,9 +26,11 @@ class Track(Base):
         nullable=False
     )
 
-    video = relationship("Video", backref="tracks")
+    video = relationship("Video", back_populates="tracks", passive_deletes=True)
     identified_student = relationship("Student", backref="tracks")
-    detections = relationship("Detection", back_populates="track", cascade="all, delete-orphan", lazy="selectin")
+    detections = relationship("Detection", back_populates="track", cascade="all, delete-orphan", passive_deletes=True, lazy="selectin")
+    reids = relationship("PersonReid", back_populates="track", cascade="all, delete-orphan", passive_deletes=True)
+    recognition_events = relationship("StudentRecognitionEvent", back_populates="track", cascade="all, delete-orphan", passive_deletes=True)
 
 class Detection(Base):
     id: Mapped[uuid.UUID] = mapped_column(
@@ -47,7 +49,7 @@ class Detection(Base):
         nullable=False
     )
 
-    track = relationship("Track", back_populates="detections")
+    track = relationship("Track", back_populates="detections", passive_deletes=True)
 
 class PersonReid(Base):
     id: Mapped[uuid.UUID] = mapped_column(
@@ -69,5 +71,5 @@ class PersonReid(Base):
         nullable=False
     )
 
-    track = relationship("Track", backref="reids")
-    video = relationship("Video", backref="reids")
+    track = relationship("Track", back_populates="reids", passive_deletes=True)
+    video = relationship("Video", back_populates="person_reids", passive_deletes=True)

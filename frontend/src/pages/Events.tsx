@@ -5,33 +5,27 @@ import {
   ShieldAlert, 
   Calendar, 
   Eye, 
-  Video, 
-  User, 
-  Users,
-  X, 
-  ExternalLink,
-  AlertTriangle,
-  Swords,
-  Footprints,
-  Lock
+  Users, 
+  Swords, 
+  Footprints, 
+  Lock,
+  AlertTriangle
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const Events: React.FC = () => {
   const [selectedFilter, setSelectedFilter] = useState<string>('ALL');
-  const [activeModalAlert, setActiveModalAlert] = useState<any | null>(null);
 
-  const { data: events, isLoading } = useQuery({
+  const { data: events, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['events-list'],
     queryFn: async () => {
       const response = await api.get('/events');
       return response.data || [];
-    }
+    },
+    staleTime: 30000,
   });
 
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-
+  
   // Filter events based on active category tab
   const filteredEvents = React.useMemo(() => {
     if (!events) return [];
@@ -50,26 +44,26 @@ export const Events: React.FC = () => {
     const type = (typeStr || '').toUpperCase();
     if (type.includes('VIOLENCE') || type.includes('FIGHT')) {
       return {
-        badge: 'bg-red-500/10 text-red-400 border-red-500/30',
-        icon: <Swords className="h-4 w-4 text-red-500" />,
+        badge: 'bg-red-50 text-red-700 border-red-200',
+        icon: <Swords className="h-4 w-4 text-red-600" />,
         label: '⚠ Violence Detected'
       };
     } else if (type.includes('FENCE') || type.includes('BOUNDARY') || type.includes('JUMP')) {
       return {
-        badge: 'bg-amber-500/10 text-amber-400 border-amber-500/30',
-        icon: <Footprints className="h-4 w-4 text-amber-500" />,
+        badge: 'bg-amber-50 text-amber-700 border-amber-200',
+        icon: <Footprints className="h-4 w-4 text-amber-600" />,
         label: 'Boundary / Fence Jump'
       };
     } else if (type.includes('RESTRICTED') || type.includes('ENTRY')) {
       return {
-        badge: 'bg-purple-500/10 text-purple-400 border-purple-500/30',
-        icon: <Lock className="h-4 w-4 text-purple-400" />,
+        badge: 'bg-purple-50 text-purple-700 border-purple-200',
+        icon: <Lock className="h-4 w-4 text-purple-600" />,
         label: 'Restricted Area Entry'
       };
     } else {
       return {
-        badge: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/30',
-        icon: <AlertTriangle className="h-4 w-4 text-yellow-400" />,
+        badge: 'bg-yellow-50 text-yellow-700 border-yellow-200',
+        icon: <AlertTriangle className="h-4 w-4 text-yellow-600" />,
         label: 'Suspicious Activity'
       };
     }
@@ -77,8 +71,25 @@ export const Events: React.FC = () => {
 
   if (isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center text-slate-400 h-96">
+      <div className="flex-1 flex items-center justify-center text-slate-500 h-96">
         <p className="animate-pulse font-semibold text-sm">Loading real-time surveillance alerts...</p>
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center text-slate-600 h-96 space-y-4">
+        <p className="text-rose-600 font-medium">Failed to load surveillance alerts</p>
+        <p className="text-xs text-slate-400 max-w-md text-center">
+          {(error as any)?.response?.data?.detail || (error as any)?.message || 'An unexpected network error occurred.'}
+        </p>
+        <button
+          onClick={() => refetch()}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition shadow-sm"
+        >
+          Retry
+        </button>
       </div>
     );
   }
@@ -88,25 +99,25 @@ export const Events: React.FC = () => {
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-bold text-slate-100">Security Alerts Log</h2>
-          <p className="text-slate-400 text-sm">Real-time surveillance triggers: Fights, fence jumps, boundary crossings, and unauthorized entries</p>
+          <h2 className="text-2xl font-bold text-slate-900">Security Alerts Log</h2>
+          <p className="text-slate-500 text-sm">Real-time surveillance triggers: Fights, fence jumps, boundary crossings, and unauthorized entries</p>
         </div>
 
         {/* Total count indicator */}
-        <div className="flex items-center space-x-2 bg-dark-card border border-dark-border px-4 py-2 rounded-xl text-xs font-mono">
-          <span className="text-slate-400">Total Recorded Alerts:</span>
-          <span className="font-bold text-blue-400 text-sm">{events?.length || 0}</span>
+        <div className="flex items-center space-x-2 bg-white border border-slate-200 px-4 py-2 rounded-xl text-xs font-mono shadow-sm">
+          <span className="text-slate-500">Total Recorded Alerts:</span>
+          <span className="font-bold text-blue-600 text-sm">{events?.length || 0}</span>
         </div>
       </div>
 
       {/* Category Filter Tabs */}
-      <div className="flex flex-wrap gap-2 bg-slate-900/40 p-2 rounded-2xl border border-dark-border">
+      <div className="flex flex-wrap gap-2 bg-white p-2 rounded-2xl border border-slate-200 shadow-sm">
         {[
           { id: 'ALL', label: 'All Alerts', icon: <ShieldAlert className="h-3.5 w-3.5" /> },
-          { id: 'FIGHT', label: 'Violence & Altercations', icon: <Swords className="h-3.5 w-3.5 text-red-400" /> },
-          { id: 'BOUNDARY', label: 'Fence Jumps & Boundary', icon: <Footprints className="h-3.5 w-3.5 text-amber-400" /> },
-          { id: 'RESTRICTED', label: 'Restricted Area Entries', icon: <Lock className="h-3.5 w-3.5 text-purple-400" /> },
-          { id: 'SUSPICIOUS', label: 'Suspicious Activities', icon: <AlertTriangle className="h-3.5 w-3.5 text-yellow-400" /> },
+          { id: 'FIGHT', label: 'Violence & Altercations', icon: <Swords className="h-3.5 w-3.5 text-red-600" /> },
+          { id: 'BOUNDARY', label: 'Fence Jumps & Boundary', icon: <Footprints className="h-3.5 w-3.5 text-amber-600" /> },
+          { id: 'RESTRICTED', label: 'Restricted Area Entries', icon: <Lock className="h-3.5 w-3.5 text-purple-600" /> },
+          { id: 'SUSPICIOUS', label: 'Suspicious Activities', icon: <AlertTriangle className="h-3.5 w-3.5 text-yellow-600" /> },
         ].map((tab) => {
           const isActive = selectedFilter === tab.id;
           return (
@@ -115,8 +126,8 @@ export const Events: React.FC = () => {
               onClick={() => setSelectedFilter(tab.id)}
               className={`flex items-center space-x-2 px-4 py-2 rounded-xl text-xs font-semibold transition ${
                 isActive
-                  ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
               }`}
             >
               {tab.icon}
@@ -127,11 +138,11 @@ export const Events: React.FC = () => {
       </div>
 
       {/* Alerts Table */}
-      <div className="bg-dark-card border border-dark-border rounded-2xl overflow-hidden shadow-lg">
+      <div className="bg-white border border-slate-200 rounded-2xl overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
-              <tr className="border-b border-dark-border text-xs font-semibold text-slate-400 bg-slate-900/50">
+              <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500 bg-slate-50">
                 <th className="px-6 py-4">Event Type / Camera</th>
                 <th className="px-6 py-4">Date / Time</th>
                 <th className="px-6 py-4">Confidence</th>
@@ -139,12 +150,12 @@ export const Events: React.FC = () => {
                 <th className="px-6 py-4 text-right">Actions & Inspection</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-dark-border text-sm text-slate-300">
+            <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {filteredEvents && filteredEvents.length > 0 ? (
                 filteredEvents.map((ev: any) => {
                   const badgeInfo = getEventBadgeClass(ev.event_type);
                   return (
-                    <tr key={ev.id} className="hover:bg-slate-900/40 transition">
+                    <tr key={ev.id} className="hover:bg-slate-50 transition">
                       {/* Event Type & Camera */}
                       <td className="px-6 py-4">
                         <div className="flex items-center space-x-3">
@@ -155,7 +166,7 @@ export const Events: React.FC = () => {
                             <span className={`text-xs font-bold px-2 py-0.5 rounded border uppercase inline-block mb-1 ${badgeInfo.badge}`}>
                               {badgeInfo.label}
                             </span>
-                            <span className="font-semibold text-slate-200 block text-xs">
+                            <span className="font-semibold text-slate-900 block text-xs">
                               Camera: {ev.camera_name || 'Camera Source'} {ev.camera_location ? `(${ev.camera_location})` : ''}
                             </span>
                           </div>
@@ -163,9 +174,9 @@ export const Events: React.FC = () => {
                       </td>
 
                       {/* Date / Time */}
-                      <td className="px-6 py-4 text-xs font-mono text-slate-400 whitespace-nowrap">
+                      <td className="px-6 py-4 text-xs font-mono text-slate-500 whitespace-nowrap">
                         <span className="flex items-center space-x-1.5">
-                          <Calendar className="h-3.5 w-3.5 text-slate-500" />
+                          <Calendar className="h-3.5 w-3.5 text-slate-400" />
                           <span>Time: {new Date(ev.timestamp).toLocaleString()}</span>
                         </span>
                       </td>
@@ -174,8 +185,8 @@ export const Events: React.FC = () => {
                       <td className="px-6 py-4 whitespace-nowrap">
                         <span className={`text-[10px] font-bold px-2.5 py-1 rounded-full border font-mono uppercase ${
                           ev.confidence === 'high' || (ev.confidence_score && ev.confidence_score >= 0.70)
-                            ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                            : 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20'
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            : 'bg-amber-50 text-amber-700 border-amber-200'
                         }`}>
                           {ev.confidence_score ? `${(ev.confidence_score * 100).toFixed(0)}% High Conf.` : `${ev.confidence} Conf.`}
                         </span>
@@ -184,22 +195,22 @@ export const Events: React.FC = () => {
                       {/* Target Identity & Persons Identified Count */}
                       <td className="px-6 py-4">
                         <div className="space-y-1">
-                          <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-200">
-                            <Users className="h-3.5 w-3.5 text-blue-400" />
+                          <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-900">
+                            <Users className="h-3.5 w-3.5 text-blue-600" />
                             <span>
                               Persons identified: {ev.persons_identified_count ?? (ev.students && ev.students.length > 0 ? ev.students.length : (ev.student_name ? 1 : 0))}
                             </span>
                           </div>
                           {ev.students && ev.students.length > 0 ? (
-                            <div className="text-[11px] text-emerald-400 font-medium truncate max-w-xs">
+                            <div className="text-[11px] text-emerald-700 font-medium truncate max-w-xs">
                               {ev.students.map((s: any) => s.name).join(', ')}
                             </div>
                           ) : ev.student_name ? (
-                            <div className="text-[11px] text-emerald-400 font-medium">
+                            <div className="text-[11px] text-emerald-700 font-medium">
                               {ev.student_name}
                             </div>
                           ) : (
-                            <div className="text-[10px] text-slate-500 italic">
+                            <div className="text-[10px] text-slate-400 italic">
                               Unidentified
                             </div>
                           )}
@@ -209,19 +220,12 @@ export const Events: React.FC = () => {
                       {/* Actions */}
                       <td className="px-6 py-4 text-right whitespace-nowrap">
                         <div className="flex items-center justify-end space-x-2">
-                          <button
-                            onClick={() => setActiveModalAlert(ev)}
-                            className="inline-flex items-center space-x-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white px-3.5 py-2 rounded-xl shadow-md shadow-blue-500/20 transition cursor-pointer"
-                          >
-                            <Eye className="h-3.5 w-3.5" />
-                            <span>[View Evidence]</span>
-                          </button>
                           <Link
                             to={`/events/${ev.id}`}
-                            className="p-2 text-slate-400 hover:text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-xl transition border border-dark-border"
-                            title="View Detailed Dossier"
+                            className="inline-flex items-center space-x-1.5 text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-xl shadow-xs transition"
                           >
-                            <ExternalLink className="h-3.5 w-3.5" />
+                            <Eye className="h-3.5 w-3.5" />
+                            <span>View Alert</span>
                           </Link>
                         </div>
                       </td>
@@ -230,7 +234,7 @@ export const Events: React.FC = () => {
                 })
               ) : (
                 <tr>
-                  <td colSpan={5} className="text-center py-16 text-slate-500">
+                  <td colSpan={5} className="text-center py-16 text-slate-400">
                     No surveillance alert events recorded for this category.
                   </td>
                 </tr>
@@ -239,179 +243,6 @@ export const Events: React.FC = () => {
           </table>
         </div>
       </div>
-
-      {/* Alert Inspection & Media Modal */}
-      {activeModalAlert && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-dark-card border border-dark-border rounded-2xl max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl space-y-6 p-6 relative">
-            {/* Close Button */}
-            <button
-              onClick={() => setActiveModalAlert(null)}
-              className="absolute top-5 right-5 text-slate-400 hover:text-slate-100 p-2 rounded-xl bg-slate-800/60 hover:bg-slate-800 border border-dark-border transition"
-            >
-              <X className="h-5 w-5" />
-            </button>
-
-            {/* Modal Header */}
-            <div className="flex items-center space-x-4 border-b border-dark-border pb-4">
-              <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl">
-                {activeModalAlert.event_type?.toUpperCase().includes('VIOLENCE') || activeModalAlert.event_type?.toUpperCase().includes('FIGHT') ? (
-                  <Swords className="h-6 w-6 text-red-500" />
-                ) : (
-                  <ShieldAlert className="h-6 w-6 text-red-500" />
-                )}
-              </div>
-              <div className="flex-1">
-                <div className="flex items-center space-x-2">
-                  <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wide">
-                    {activeModalAlert.event_type?.toUpperCase().includes('VIOLENCE') || activeModalAlert.event_type?.toUpperCase().includes('FIGHT')
-                      ? '⚠ Violence Detected'
-                      : `${activeModalAlert.event_type?.replace(/_/g, ' ')} Alert Forensic Inspection`}
-                  </h3>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-mono">
-                    VERIFIED ANOMALY
-                  </span>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2 text-xs font-mono text-slate-300 bg-slate-900/80 p-2.5 rounded-xl border border-dark-border">
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Camera</span>
-                    <span className="font-bold text-slate-200 truncate block">
-                      {activeModalAlert.camera_name} {activeModalAlert.camera_location ? `(${activeModalAlert.camera_location})` : ''}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Time</span>
-                    <span className="font-bold text-slate-200 block">
-                      {new Date(activeModalAlert.timestamp).toLocaleString()}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-[10px] text-slate-500 uppercase block font-sans">Persons Identified</span>
-                    <span className="font-bold text-emerald-400 block">
-                      {activeModalAlert.persons_identified_count ?? (activeModalAlert.students?.length || (activeModalAlert.student_name ? 1 : 0))}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Explanation Summary */}
-            {activeModalAlert.explanation && (
-              <div className="bg-slate-900/60 border border-dark-border p-4 rounded-xl space-y-1 text-xs">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono">
-                  Trigger Reason & Explanation
-                </span>
-                <p className="text-slate-200 italic leading-relaxed">
-                  "{activeModalAlert.explanation}"
-                </p>
-              </div>
-            )}
-
-            {/* Visual Media Section (Video & Screenshot) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Video sub-clip */}
-              {activeModalAlert.evidence_video && (
-                <div className="space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono flex items-center space-x-1">
-                    <Video className="h-3.5 w-3.5 text-blue-400" />
-                    <span>Recorded Video Clip</span>
-                  </span>
-                  <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950">
-                    <video
-                      src={`${API_URL}${activeModalAlert.evidence_video}`}
-                      controls
-                      autoPlay
-                      className="w-full max-h-56 object-contain"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Screenshot Frame Crop */}
-              {activeModalAlert.evidence_image && (
-                <div className="space-y-2">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono flex items-center space-x-1">
-                    <Eye className="h-3.5 w-3.5 text-purple-400" />
-                    <span>Frame Screenshot Crop</span>
-                  </span>
-                  <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950 flex justify-center p-1">
-                    <AuthenticatedImage
-                      src={activeModalAlert.evidence_image}
-                      alt="Alert Screenshot"
-                      className="max-h-56 object-contain rounded-lg"
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Engaged Student Profiles */}
-            <div className="space-y-3 pt-2 border-t border-dark-border">
-              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono block">
-                Engaged Student Profiles (Student Directory Match)
-              </span>
-              {activeModalAlert.students && activeModalAlert.students.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {activeModalAlert.students.map((std: any, sIdx: number) => (
-                    <div key={sIdx} className="bg-slate-900/50 border border-dark-border p-3.5 rounded-xl space-y-2">
-                      <div className="flex justify-between items-center border-b border-dark-border/40 pb-2">
-                        <div className="flex items-center space-x-2">
-                          <User className="h-4 w-4 text-blue-400" />
-                          <span className="text-xs font-bold text-slate-200">{std.name}</span>
-                        </div>
-                        <span className="text-[9px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-mono font-semibold">
-                          Directory Matched
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-[11px] font-mono text-slate-400">
-                        <div>
-                          <span className="text-[9px] text-slate-500 block">Roll Number</span>
-                          <span className="text-slate-200 font-bold">{std.roll_number}</span>
-                        </div>
-                        <div>
-                          <span className="text-[9px] text-slate-500 block">Class</span>
-                          <span className="text-slate-200 font-bold">{std.class}</span>
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : activeModalAlert.student_name ? (
-                <div className="bg-slate-900/50 border border-dark-border p-3.5 rounded-xl space-y-2 max-w-sm">
-                  <div className="flex justify-between items-center border-b border-dark-border/40 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <User className="h-4 w-4 text-blue-400" />
-                      <span className="text-xs font-bold text-slate-200">{activeModalAlert.student_name}</span>
-                    </div>
-                    <span className="text-[9px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-mono font-semibold">
-                      Directory Matched
-                    </span>
-                  </div>
-                  <div className="text-[11px] font-mono text-slate-400">
-                    <span className="text-[9px] text-slate-500 block">Roll Number</span>
-                    <span className="text-slate-200 font-bold">{activeModalAlert.student_roll || 'N/A'}</span>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-center py-4 bg-slate-900/30 border border-dashed border-dark-border text-xs text-slate-500 rounded-xl">
-                  No face enrollment matches resolved in student directory for this event (Unknown Target).
-                </div>
-              )}
-            </div>
-
-            {/* Footer Action */}
-            <div className="flex justify-end pt-2">
-              <Link
-                to={`/events/${activeModalAlert.id}`}
-                className="bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold px-5 py-2.5 rounded-xl shadow-lg transition flex items-center space-x-2"
-              >
-                <span>Open Full Incident Dossier Page</span>
-                <ExternalLink className="h-3.5 w-3.5" />
-              </Link>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

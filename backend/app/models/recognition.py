@@ -27,6 +27,6 @@ class StudentRecognitionEvent(Base):
     confidence: Mapped[str] = mapped_column(String(50), nullable=False)  # "high", "medium", "unknown"
     camera_id: Mapped[str] = mapped_column(String(100), nullable=True)
 
-    track = relationship("Track", backref="recognition_events")
+    track = relationship("Track", back_populates="recognition_events", passive_deletes=True)
     student = relationship("Student", backref="recognition_events")
-    video = relationship("Video", backref="recognition_events")
+    video = relationship("Video", back_populates="recognition_events", passive_deletes=True)

@@ -42,3 +42,8 @@ class Video(Base):
 
     uploader = relationship("User", back_populates="videos")
     camera = relationship("Camera", backref="videos")
+    tracks = relationship("Track", back_populates="video", cascade="all, delete-orphan", passive_deletes=True)
+    person_reids = relationship("PersonReid", back_populates="video", cascade="all, delete-orphan", passive_deletes=True)
+    recognition_events = relationship("StudentRecognitionEvent", back_populates="video", cascade="all, delete-orphan", passive_deletes=True)
+    detected_events = relationship("DetectedEvent", back_populates="video", cascade="all, delete-orphan", passive_deletes=True)
+    events = relationship("Event", back_populates="video", cascade="all, delete-orphan", passive_deletes=True)

@@ -1,25 +1,30 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { SearchBar } from '../components/SearchBar';
 import { 
   RefreshCw, 
   ShieldAlert, 
-  Video, 
   Eye, 
-  Calendar, 
+  Clock, 
   User, 
   AlertTriangle,
-  ChevronRight,
-  Trash2
+  ChevronDown,
+  Trash2,
+  ExternalLink,
+  Film,
+  Camera as CameraIcon
 } from 'lucide-react';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
 export const Search: React.FC = () => {
+  const navigate = useNavigate();
   const [query, setQuery] = useState('');
   const [selectedResult, setSelectedResult] = useState<any>(null);
   const [selectedCameraId, setSelectedCameraId] = useState<string>('all');
+  const [expandedDiagnostics, setExpandedDiagnostics] = useState<Record<string, boolean>>({});
 
   // Fetch cameras list
   const { data: cameras } = useQuery({
@@ -50,7 +55,6 @@ export const Search: React.FC = () => {
 
   const [isEvidenceDeleteModalOpen, setIsEvidenceDeleteModalOpen] = useState(false);
   const [evidenceToDeleteId, setEvidenceToDeleteId] = useState<string | null>(null);
-  const [evidenceTypeToDelete, setEvidenceTypeToDelete] = useState<'image' | 'video' | null>(null);
 
   const deleteEvidenceMutation = useMutation({
     mutationFn: async (evidenceId: string) => {
@@ -58,14 +62,7 @@ export const Search: React.FC = () => {
     },
     onSuccess: () => {
       if (selectedResult && selectedResult.evidence) {
-        const updatedEvidence = { ...selectedResult.evidence };
-        if (evidenceTypeToDelete === 'image') {
-          updatedEvidence.image = null;
-          updatedEvidence.image_id = null;
-        } else if (evidenceTypeToDelete === 'video') {
-          updatedEvidence.video = null;
-          updatedEvidence.video_id = null;
-        }
+        const updatedEvidence = { ...selectedResult.evidence, image: null, image_id: null };
         setSelectedResult({
           ...selectedResult,
           evidence: updatedEvidence
@@ -73,14 +70,12 @@ export const Search: React.FC = () => {
       }
       setIsEvidenceDeleteModalOpen(false);
       setEvidenceToDeleteId(null);
-      setEvidenceTypeToDelete(null);
-      alert('Evidence file deleted successfully!');
+      alert('Evidence screenshot deleted successfully!');
     },
     onError: (err: any) => {
       alert(`Failed to delete evidence: ${err.response?.data?.detail || err.message}`);
       setIsEvidenceDeleteModalOpen(false);
       setEvidenceToDeleteId(null);
-      setEvidenceTypeToDelete(null);
     }
   });
 
@@ -89,44 +84,144 @@ export const Search: React.FC = () => {
     searchMutation.mutate();
   };
 
+  const toggleDiagnostic = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpandedDiagnostics(prev => ({
+      ...prev,
+      [id]: !prev[id]
+    }));
+  };
+
   const queryType = searchMutation.data?.query_type || null;
-  const results = searchMutation.data?.results || [];
+  const rawResults = searchMutation.data?.results || [];
+
+  // Deduplicate repeated matches:
+  // For person search (identity/appearance): group repeated detections of the same verified student
+  // within the same source video and camera, showing only the earliest valid detection.
+  // For incident search: collapse duplicate candidates for the same incident while keeping separate incidents distinct.
+  const deduplicatedResults: any[] = React.useMemo(() => {
+    if (!rawResults || rawResults.length === 0) return [];
+
+    if (queryType === 'identity' || queryType === 'appearance') {
+      const personGrouped = new Map<string, any>();
+      for (const res of rawResults) {
+        const student = res.student || (res.students && res.students[0]);
+        const studentId = student?.id || student?.student_id;
+        const vid = res.source_video || res.video_id || 'unknown_video';
+        const cam = res.camera_name || res.camera || 'unknown_cam';
+
+        if (studentId) {
+          // Verified student: deduplicate within same source video and camera
+          const key = `student_${studentId}_${vid}_${cam}`;
+          if (personGrouped.has(key)) {
+            const existing = personGrouped.get(key);
+            const existingTime = existing.first_detection_timestamp || existing.detected_at || existing.timestamp || '';
+            const newTime = res.first_detection_timestamp || res.detected_at || res.timestamp || '';
+            if (newTime && (!existingTime || newTime < existingTime)) {
+              personGrouped.set(key, res);
+            }
+          } else {
+            personGrouped.set(key, res);
+          }
+        } else {
+          // Unknown person: preserve separate tracks/identities
+          const trackKey = `track_${res.track_id || res.id || Math.random()}_${vid}_${cam}`;
+          personGrouped.set(trackKey, res);
+        }
+      }
+      return Array.from(personGrouped.values());
+    }
+
+    // Incident search queries: continue grouping duplicate retrieval candidates by stable incident/event ID,
+    // while preserving distinct incidents even when they occur close together.
+    const grouped = new Map<string, any>();
+    for (const res of rawResults) {
+      const vid = res.source_video || null;
+      const cam = res.camera_name || res.camera || '';
+      const start = res.detected_at || res.start_time || res.timestamp || '';
+      const itype = res.incident_type || '';
+      const incId = res.id || res.incident_id;
+
+      const fullKey = incId ? `inc_${incId}` : `${vid}_${cam}_${start}_${itype}`;
+      const baseKey = `${cam}_${start}_${itype}`;
+
+      let matchedKey: string | null = null;
+      if (incId) {
+        matchedKey = fullKey;
+      } else if (!vid) {
+        // check if baseKey matches an existing item
+        for (const k of grouped.keys()) {
+          if (k.endsWith(`_${baseKey}`)) {
+            matchedKey = k;
+            break;
+          }
+        }
+      } else {
+        // if this item has a real video, check if there's an orphan None item to remove
+        const orphanKey = `null_${baseKey}`;
+        if (grouped.has(orphanKey)) {
+          grouped.delete(orphanKey);
+        }
+        matchedKey = fullKey;
+      }
+
+      if (matchedKey && grouped.has(matchedKey)) {
+        const existing = grouped.get(matchedKey);
+        if (!existing.source_video && res.source_video) {
+          grouped.set(matchedKey, res);
+        } else if ((res.students?.length || 0) > (existing.students?.length || 0)) {
+          grouped.set(matchedKey, res);
+        }
+      } else {
+        grouped.set(matchedKey || fullKey, res);
+      }
+    }
+    return Array.from(grouped.values());
+  }, [rawResults, queryType]);
 
   const getQueryTypeBadge = (type: string) => {
     switch (type) {
       case 'identity':
-        return 'bg-blue-600/10 border-blue-500/20 text-blue-400';
+        return 'bg-blue-50 border-blue-200 text-blue-700';
       case 'appearance':
-        return 'bg-purple-600/10 border-purple-500/20 text-purple-400';
+        return 'bg-purple-50 border-purple-200 text-purple-700';
       case 'incident':
-        return 'bg-red-600/10 border-red-500/20 text-red-400';
+        return 'bg-red-50 border-red-200 text-red-700';
       default:
-        return 'bg-slate-800 border-slate-700 text-slate-400';
+        return 'bg-slate-100 border-slate-200 text-slate-600';
     }
   };
 
-  const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  const formatAcademicLine = (std: any) => {
+    const parts: string[] = [];
+    if (std.class || std.programme) parts.push(std.class || std.programme);
+    if (std.department && std.department !== 'Not available') parts.push(std.department);
+    if (std.semester) parts.push(`Sem ${std.semester}`);
+    if (std.year) parts.push(`Year ${std.year}`);
+    if (std.section && std.section !== 'Not available') parts.push(`Sec ${std.section}`);
+    return parts.join(' • ');
+  };
 
   return (
     <div className="space-y-8 py-2">
       {/* Page Header */}
       <div>
-        <h2 className="text-2xl font-bold text-slate-100">AI Investigation Assistant</h2>
-        <p className="text-slate-400 text-sm">One search bar for all incident, biometric student name, or clothing appearance queries.</p>
+        <h2 className="text-2xl font-bold text-slate-900">AI Investigation Assistant</h2>
+        <p className="text-slate-500 text-sm">Search by incident type, student identity, or visual appearance with automated forensic evidence extraction.</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left column - search input and results list */}
         <div className="lg:col-span-7 space-y-6">
           {/* Camera Selector */}
-          <div className="flex flex-col space-y-1.5 bg-slate-900/40 p-4 rounded-xl border border-dark-border">
-            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400 font-mono">
+          <div className="flex flex-col space-y-1.5 bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <label className="text-[10px] font-bold uppercase tracking-wider text-slate-600 font-mono">
               Investigation Camera Scope
             </label>
             <select
               value={selectedCameraId}
               onChange={(e) => setSelectedCameraId(e.target.value)}
-              className="bg-dark-card border border-dark-border text-slate-200 text-xs rounded-xl px-4 py-2.5 outline-none focus:border-blue-500 transition cursor-pointer max-w-md font-semibold"
+              className="bg-white border border-slate-300 text-slate-800 text-xs rounded-xl px-4 py-2.5 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition cursor-pointer max-w-md font-semibold"
             >
               <option value="all">All Cameras</option>
               {cameras?.map((cam: any) => (
@@ -140,7 +235,7 @@ export const Search: React.FC = () => {
           <div className="flex gap-4">
             <div className="flex-1">
               <SearchBar
-                placeholder="Ask anything: 'Find Dipz', 'person in black shirt', 'Did anyone jump the wall?'..."
+                placeholder="Ask anything: 'Fight', 'Find Anukutty', 'person in black shirt'..."
                 value={query}
                 onChange={setQuery}
                 onSubmit={handleSearch}
@@ -149,7 +244,7 @@ export const Search: React.FC = () => {
             <button
               onClick={handleSearch}
               disabled={searchMutation.isPending}
-              className="bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white font-semibold px-6 py-3 rounded-xl shadow-lg transition flex items-center space-x-2"
+              className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-400 text-white font-semibold px-6 py-3 rounded-xl shadow-sm transition flex items-center space-x-2"
             >
               {searchMutation.isPending ? (
                 <RefreshCw className="h-5 w-5 animate-spin" />
@@ -161,269 +256,451 @@ export const Search: React.FC = () => {
 
           {/* Connection errors */}
           {searchMutation.isError && (
-            <div className="flex items-center space-x-3 bg-red-500/10 border border-red-500/20 text-red-400 p-4 rounded-xl text-sm">
+            <div className="flex items-center space-x-3 bg-red-50 border border-red-200 text-red-600 p-4 rounded-xl text-sm">
               <AlertTriangle className="h-5 w-5 flex-shrink-0" />
               <span>Failed to execute search. Check connection to the backend service.</span>
             </div>
           )}
 
-          {/* Loading, Empty and Success states */}
+          {/* Idle state */}
           {searchMutation.isIdle && (
-            <div className="text-center py-24 text-slate-500 text-sm bg-dark-card border border-dark-border rounded-2xl">
-              Enter any investigation query above to query the CCTV logs.
+            <div className="text-center py-24 text-slate-500 text-sm bg-white border border-slate-200 rounded-2xl shadow-sm">
+              Enter any investigation query above to query CCTV records.
             </div>
           )}
 
+          {/* Pending state */}
           {searchMutation.isPending && (
-            <div className="text-center py-24 text-slate-400 text-sm animate-pulse bg-dark-card border border-dark-border rounded-2xl">
-              Classifying search intent and routing query through visual networks...
+            <div className="text-center py-24 text-slate-400 text-sm animate-pulse bg-white border border-slate-200 rounded-2xl shadow-sm">
+              Analyzing visual feeds, incident records, and student biometric registry...
             </div>
           )}
 
+          {/* Results list */}
           {searchMutation.isSuccess && (
             <div className="space-y-4">
-              
               {/* Classified Intent Pill Badge */}
               {queryType && (
-                <div className="flex items-center space-x-2">
-                  <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">Classification Intent:</span>
-                  <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${getQueryTypeBadge(queryType)}`}>
-                    {queryType} Search
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider">Classification Intent:</span>
+                    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border ${getQueryTypeBadge(queryType)}`}>
+                      {queryType} Search
+                    </span>
+                  </div>
+                  <span className="text-xs text-slate-500 font-medium">
+                    {deduplicatedResults.length} {queryType === 'incident' ? 'distinct incident' : 'search result'}{deduplicatedResults.length === 1 ? '' : 's'}
                   </span>
                 </div>
               )}
 
-              {results.length > 0 ? (
-                results.map((res: any, idx: number) => (
-                  <div
-                    key={idx}
-                    onClick={() => setSelectedResult(res)}
-                    className={`bg-dark-card border rounded-2xl p-5 shadow-md transition cursor-pointer flex flex-col md:flex-row md:items-center justify-between gap-4 ${
-                      selectedResult === res ? 'border-blue-500 ring-2 ring-blue-500/10' : 'border-dark-border hover:border-slate-700'
-                    }`}
-                  >
-                    <div className="space-y-3 flex-1">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700/50">
-                          Match #{idx + 1}
-                        </span>
-                        <span className="text-[10px] font-semibold text-slate-500 font-mono">
-                          Camera: {res.camera}
-                        </span>
-                      </div>
-                      
-                      {/* Explainability reason */}
-                      <p className="text-xs text-slate-300 font-medium">
-                        {res.match_reason}
-                      </p>
+              {deduplicatedResults.length > 0 ? (
+                deduplicatedResults.map((res: any, idx: number) => {
+                  const cardStudents = res.students && res.students.length > 0 ? res.students : (res.student ? [res.student] : []);
+                  const isViolence = (res.incident_type || '').toLowerCase().includes('violence') || (res.incident_type || '').toLowerCase().includes('fight');
+                  const isStudentIdentified = (res.incident_type || '').toLowerCase().includes('student') || (res.incident_type || '').toLowerCase().includes('person') || queryType === 'identity';
+                  const cardTitle = res.title || (isViolence ? 'Violence detected — Fight' : isStudentIdentified ? (cardStudents[0]?.name ? `Student Identified — ${cardStudents[0].name}` : 'Student Identified') : `${res.incident_type || 'Incident'} detected`);
+                  const isSelected = selectedResult === res || (selectedResult && (selectedResult.id === res.id || (selectedResult.incident_id && selectedResult.incident_id === res.incident_id)));
+                  const cardKey = res.id || res.incident_id || idx.toString();
+                  const showDiag = expandedDiagnostics[cardKey];
 
-                      <div className="flex items-center space-x-4 text-[10px] text-slate-500 font-mono">
-                        <span className="flex items-center space-x-1">
-                          <Calendar className="h-3 w-3" />
-                          <span>{res.timestamp}</span>
-                        </span>
-                        {res.student && (
-                          <span className="flex items-center space-x-1 text-blue-400 font-semibold">
-                            <User className="h-3 w-3" />
-                            <span>{res.student.name}</span>
+                  return (
+                    <div
+                      key={cardKey}
+                      onClick={() => setSelectedResult(res)}
+                      className={`bg-white border rounded-2xl p-5 shadow-sm transition cursor-pointer flex flex-col gap-4 ${
+                        isSelected ? 'border-blue-500 ring-2 ring-blue-500/10' : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      {/* Top Row: Incident Title & Camera Badge */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                        <div className="flex items-center space-x-2">
+                          <span className={`text-xs font-bold px-2.5 py-1 rounded-lg border ${
+                            isViolence 
+                              ? 'bg-rose-50 text-rose-700 border-rose-200' 
+                              : isStudentIdentified
+                                ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                : 'bg-amber-50 text-amber-700 border-amber-200'
+                          }`}>
+                            {cardTitle}
                           </span>
+                        </div>
+                        <div className="flex items-center space-x-1.5 text-xs text-slate-600 font-medium">
+                          <CameraIcon className="h-3.5 w-3.5 text-slate-400" />
+                          <span>{res.camera_name || res.camera || 'Campus Camera'}</span>
+                        </div>
+                      </div>
+
+                      {/* Middle Grid: Source Video & Authoritative Start Time */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs bg-slate-50/80 p-3 rounded-xl border border-slate-100">
+                        <div>
+                          <span className="text-[10px] font-mono uppercase text-slate-500 block">Source Video</span>
+                          <span className="font-semibold text-slate-800 break-all flex items-center gap-1 mt-0.5">
+                            <Film className="h-3 w-3 text-slate-400 flex-shrink-0" />
+                            {res.source_video || 'Source video unavailable'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[10px] font-mono uppercase text-slate-500 block">
+                            {queryType === 'identity' || queryType === 'appearance' ? 'First Detection' : 'Detected at (Start)'}
+                          </span>
+                          <span className="font-bold text-slate-900 flex items-center gap-1 mt-0.5">
+                            <Clock className="h-3 w-3 text-slate-400 flex-shrink-0" />
+                            {res.first_detection_timestamp || res.detected_at || res.start_time || res.timestamp || 'Timestamp unavailable'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Identified Students Section */}
+                      <div className="space-y-2">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 font-mono block">
+                          Identified Students
+                        </span>
+                        {cardStudents.length > 0 ? (
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {cardStudents.map((std: any, sIdx: number) => (
+                              <div
+                                key={sIdx}
+                                className="flex items-center space-x-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-2xs"
+                              >
+                                {std.photo_url ? (
+                                  <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0 border border-slate-200 bg-slate-100">
+                                    <AuthenticatedImage
+                                      src={std.photo_url}
+                                      alt={std.name}
+                                      className="w-full h-full object-cover"
+                                      fallbackIcon={<User className="h-5 w-5 text-slate-400 m-auto" />}
+                                    />
+                                  </div>
+                                ) : (
+                                  <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center flex-shrink-0 font-bold text-xs border border-blue-100">
+                                    {std.name?.slice(0, 2)?.toUpperCase() || 'ST'}
+                                  </div>
+                                )}
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-bold text-slate-900 truncate">{std.name}</span>
+                                    <span className="text-[10px] text-blue-700 bg-blue-50 px-1.5 py-0.2 rounded font-mono font-semibold">
+                                      {std.roll_number || 'N/A'}
+                                    </span>
+                                  </div>
+                                  <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                                    {formatAcademicLine(std) || 'Student Record Verified'}
+                                  </p>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-slate-400 italic bg-slate-50/50 p-2.5 rounded-xl border border-dashed border-slate-200 text-center">
+                            No confirmed student identities
+                          </div>
                         )}
                       </div>
-                    </div>
 
-                    <div className="flex items-center space-x-2 justify-end">
-                      <span className="text-xs font-bold text-slate-400">
-                        Score: {res.confidence.toFixed(2)}
-                      </span>
-                      <ChevronRight className="h-5 w-5 text-slate-600" />
+                      {/* Evidence Screenshot Thumbnail & View Incident Button */}
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100 gap-3">
+                        <div className="flex items-center space-x-2">
+                          {res.evidence?.image ? (
+                            <div className="flex items-center space-x-2">
+                              <div className="w-12 h-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-900 flex-shrink-0">
+                                <AuthenticatedImage
+                                  src={res.evidence.image}
+                                  alt="Evidence thumbnail"
+                                  className="w-full h-full object-cover"
+                                  fallbackIcon={<Eye className="h-4 w-4 text-slate-400 m-auto" />}
+                                />
+                              </div>
+                              <span className="text-[11px] text-slate-500 font-medium">Keyframe Evidence</span>
+                            </div>
+                          ) : (
+                            <span className="text-[11px] text-slate-400">No screenshot thumbnail</span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center space-x-2">
+                          <button
+                            type="button"
+                            onClick={(e) => toggleDiagnostic(cardKey, e)}
+                            className="text-[11px] text-slate-500 hover:text-slate-700 px-2.5 py-1.5 rounded-lg border border-slate-200 hover:bg-slate-50 transition flex items-center space-x-1"
+                          >
+                            <span>Diagnostics</span>
+                            <ChevronDown className={`h-3 w-3 transition-transform ${showDiag ? 'rotate-180' : ''}`} />
+                          </button>
+
+                          {(res.incident_id || res.id) && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigate(`/events/${res.incident_id || res.id}`);
+                              }}
+                              className="bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold px-3.5 py-1.5 rounded-xl shadow-2xs transition flex items-center space-x-1.5"
+                            >
+                              <span>View Incident</span>
+                              <ExternalLink className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Expandable Diagnostics Details */}
+                      {showDiag && (
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 text-[11px] text-slate-600 space-y-1.5 font-mono">
+                          <div className="flex justify-between">
+                            <span className="text-slate-400">Match Reason:</span>
+                            <span className="text-slate-700 font-sans text-right max-w-xs">{res.match_reason}</span>
+                          </div>
+                          {res.confidence !== undefined && (
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Confidence Score:</span>
+                              <span className="font-bold text-slate-800">{(res.confidence * 100).toFixed(1)}%</span>
+                            </div>
+                          )}
+                          {res.incident_interval && (
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Detection Interval:</span>
+                              <span className="text-slate-700">{res.incident_interval}</span>
+                            </div>
+                          )}
+                          {res.id && (
+                            <div className="flex justify-between">
+                              <span className="text-slate-400">Record ID:</span>
+                              <span className="text-slate-700">{res.id}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
-                <div className="text-center py-16 text-slate-500 text-sm bg-dark-card border border-dark-border rounded-2xl">
-                  No records matched your search query. Try: "Find Dipz", "person in black shirt", or "Did anyone jump the wall?".
+                <div className="text-center py-16 text-slate-500 text-sm bg-white border border-slate-200 rounded-2xl shadow-sm">
+                  No records matched your search query. Try: "Fight", "Find Anukutty", or "person in black shirt".
                 </div>
               )}
             </div>
           )}
         </div>
 
-        {/* Right column - detailed forensic evidence dossiers */}
+        {/* Right column - simplified forensic evidence dossier */}
         <div className="lg:col-span-5">
           {selectedResult ? (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-xl space-y-6">
-              <div className="flex items-center justify-between border-b border-dark-border pb-3">
-                <div className="flex items-center space-x-2 text-slate-200 font-bold">
-                  <ShieldAlert className="h-5 w-5 text-blue-500" />
-                  <span>Forensic Evidence Dossier</span>
-                </div>
-              </div>
-
-              {/* General Metadata */}
-              <div className="grid grid-cols-2 gap-4 bg-slate-900/40 p-4 rounded-xl border border-dark-border/50 text-xs">
-                <div>
-                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Camera Name</span>
-                  <span className="font-semibold text-slate-200">{selectedResult.camera}</span>
-                </div>
-                <div>
-                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Search Confidence</span>
-                  <span className="font-bold text-blue-400 font-mono">
-                    {(selectedResult.confidence * 100).toFixed(0)}%
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-6">
+              {/* Header: Incident Type & View Incident action */}
+              <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+                <div className="flex items-center space-x-2">
+                  <ShieldAlert className="h-5 w-5 text-blue-600" />
+                  <span className="font-bold text-slate-900 text-sm">
+                    {selectedResult.title || (
+                      (selectedResult.incident_type || '').toLowerCase().includes('violence') || (selectedResult.incident_type || '').toLowerCase().includes('fight')
+                        ? 'Violence detected — Fight'
+                        : `${selectedResult.incident_type || 'Incident'} detected`
+                    )}
                   </span>
                 </div>
-                <div className="mt-2">
-                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Timestamp</span>
-                  <span className="font-semibold text-slate-200">{selectedResult.timestamp}</span>
+                {(selectedResult.incident_id || selectedResult.id) && (
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/events/${selectedResult.incident_id || selectedResult.id}`)}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 flex items-center space-x-1"
+                  >
+                    <span>View Incident</span>
+                    <ExternalLink className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+
+              {/* Incident Metadata (Source Video, Camera, Incident Start Timestamp) */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2.5 text-xs">
+                <div>
+                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Source Video</span>
+                  <span className="font-semibold text-slate-800 break-all flex items-center gap-1.5 mt-0.5">
+                    <Film className="h-3.5 w-3.5 text-slate-400 flex-shrink-0" />
+                    {selectedResult.source_video || 'Source video unavailable'}
+                  </span>
                 </div>
-                <div className="mt-2">
-                  <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Match Routing</span>
-                  <span className="font-semibold text-slate-400 capitalize">{queryType} Pipeline</span>
+                <div className="grid grid-cols-2 gap-3 pt-2 border-t border-slate-200/60">
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Camera</span>
+                    <span className="font-semibold text-slate-800 flex items-center gap-1 mt-0.5">
+                      <CameraIcon className="h-3 w-3 text-slate-400 flex-shrink-0" />
+                      {selectedResult.camera_name || selectedResult.camera || 'Campus Camera'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] text-slate-500 uppercase tracking-wider block font-mono">Detected At (Start)</span>
+                    <span className="font-bold text-slate-900 flex items-center gap-1 mt-0.5">
+                      <Clock className="h-3 w-3 text-slate-400 flex-shrink-0" />
+                      {selectedResult.detected_at || selectedResult.start_time || selectedResult.timestamp || 'Timestamp unavailable'}
+                    </span>
+                  </div>
                 </div>
               </div>
 
-              {/* Explainable Match Reason */}
-              <div className="space-y-2">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block font-mono">Reason for Match</span>
-                <div className="bg-slate-900/60 border border-dark-border p-4 rounded-xl text-xs text-slate-300 italic leading-relaxed">
-                  "{selectedResult.match_reason}"
-                </div>
-              </div>
-
-              {/* Involved Student Card */}
+              {/* Confirmed Student Details */}
               <div className="space-y-3">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block font-mono">
-                  Involved Engaged Student Profile(s)
-                </span>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wider block font-mono">
+                    Confirmed Student Details
+                  </span>
+                  {selectedResult.students && selectedResult.students.length > 0 && (
+                    <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-mono font-semibold">
+                      {selectedResult.students.length} Verified in Directory
+                    </span>
+                  )}
+                </div>
+
                 {selectedResult.students && selectedResult.students.length > 0 ? (
                   selectedResult.students.map((std: any, sIdx: number) => (
-                    <div key={sIdx} className="bg-slate-900/40 border border-dark-border p-4 rounded-xl space-y-3">
-                      <div className="flex justify-between items-center border-b border-dark-border/40 pb-2">
-                        <div className="flex items-center space-x-2">
-                          <User className="h-4 w-4 text-blue-400" />
-                          <span className="text-xs font-bold text-slate-200">{std.name}</span>
+                    <div key={sIdx} className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-3">
+                      <div className="flex items-center space-x-3 border-b border-slate-200 pb-3">
+                        {std.photo_url ? (
+                          <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-200 bg-white flex-shrink-0">
+                            <AuthenticatedImage
+                              src={std.photo_url}
+                              alt={std.name}
+                              className="w-full h-full object-cover"
+                              fallbackIcon={<User className="h-6 w-6 text-slate-400 m-auto" />}
+                            />
+                          </div>
+                        ) : (
+                          <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center flex-shrink-0 font-bold text-sm">
+                            {std.name?.slice(0, 2)?.toUpperCase() || 'ST'}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <h4 className="text-sm font-bold text-slate-900 truncate">{std.name}</h4>
+                          <span className="text-xs font-mono font-semibold text-blue-600">
+                            Roll No: {std.roll_number || 'N/A'}
+                          </span>
                         </div>
-                        <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-mono font-semibold">
-                          Identified in Directory
-                        </span>
                       </div>
                       
-                      <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-400 font-mono">
+                      <div className="grid grid-cols-2 gap-3 text-xs text-slate-600">
                         <div>
-                          <span className="text-[9px] text-slate-500 block">Roll Number</span>
-                          <span className="text-slate-300 font-bold">{std.roll_number}</span>
+                          <span className="text-[9px] text-slate-500 uppercase font-mono block">Class / Programme</span>
+                          <span className="text-slate-800 font-semibold">{std.class || std.programme || 'Not available'}</span>
                         </div>
                         <div>
-                          <span className="text-[9px] text-slate-500 block">Class / Section</span>
-                          <span className="text-slate-300 font-bold">{std.class}</span>
+                          <span className="text-[9px] text-slate-500 uppercase font-mono block">Department</span>
+                          <span className="text-slate-800 font-semibold">{std.department || 'Not available'}</span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-slate-500 uppercase font-mono block">Semester & Year</span>
+                          <span className="text-slate-800 font-semibold">
+                            {[std.semester ? `Sem ${std.semester}` : null, std.year ? `Year ${std.year}` : null].filter(Boolean).join(', ') || 'Not available'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-[9px] text-slate-500 uppercase font-mono block">Section</span>
+                          <span className="text-slate-800 font-semibold">{std.section || 'Not available'}</span>
                         </div>
                       </div>
                     </div>
                   ))
                 ) : selectedResult.student ? (
-                  <div className="bg-slate-900/40 border border-dark-border p-4 rounded-xl space-y-3">
-                    <div className="flex justify-between items-center border-b border-dark-border/40 pb-2">
-                      <div className="flex items-center space-x-2">
-                        <User className="h-4 w-4 text-blue-400" />
-                        <span className="text-xs font-bold text-slate-200">{selectedResult.student.name}</span>
+                  <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl space-y-3">
+                    <div className="flex items-center space-x-3 border-b border-slate-200 pb-3">
+                      {selectedResult.student.photo_url ? (
+                        <div className="w-12 h-12 rounded-xl overflow-hidden border border-slate-200 bg-white flex-shrink-0">
+                          <AuthenticatedImage
+                            src={selectedResult.student.photo_url}
+                            alt={selectedResult.student.name}
+                            className="w-full h-full object-cover"
+                            fallbackIcon={<User className="h-6 w-6 text-slate-400 m-auto" />}
+                          />
+                        </div>
+                      ) : (
+                        <div className="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center flex-shrink-0 font-bold text-sm">
+                          {selectedResult.student.name?.slice(0, 2)?.toUpperCase() || 'ST'}
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <h4 className="text-sm font-bold text-slate-900 truncate">{selectedResult.student.name}</h4>
+                        <span className="text-xs font-mono font-semibold text-blue-600">
+                          Roll No: {selectedResult.student.roll_number || 'N/A'}
+                        </span>
                       </div>
-                      <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 font-mono font-semibold">
-                        Identified in Directory
-                      </span>
                     </div>
                     
-                    <div className="grid grid-cols-2 gap-3 text-[11px] text-slate-400 font-mono">
+                    <div className="grid grid-cols-2 gap-3 text-xs text-slate-600">
                       <div>
-                        <span className="text-[9px] text-slate-500 block">Roll Number</span>
-                        <span className="text-slate-300 font-bold">{selectedResult.student.roll_number}</span>
+                        <span className="text-[9px] text-slate-500 uppercase font-mono block">Class / Programme</span>
+                        <span className="text-slate-800 font-semibold">{selectedResult.student.class || selectedResult.student.programme || 'Not available'}</span>
                       </div>
                       <div>
-                        <span className="text-[9px] text-slate-500 block">Class / Section</span>
-                        <span className="text-slate-300 font-bold">{selectedResult.student.class}</span>
+                        <span className="text-[9px] text-slate-500 uppercase font-mono block">Department</span>
+                        <span className="text-slate-800 font-semibold">{selectedResult.student.department || 'Not available'}</span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-500 uppercase font-mono block">Semester & Year</span>
+                        <span className="text-slate-800 font-semibold">
+                          {[selectedResult.student.semester ? `Sem ${selectedResult.student.semester}` : null, selectedResult.student.year ? `Year ${selectedResult.student.year}` : null].filter(Boolean).join(', ') || 'Not available'}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[9px] text-slate-500 uppercase font-mono block">Section</span>
+                        <span className="text-slate-800 font-semibold">{selectedResult.student.section || 'Not available'}</span>
                       </div>
                     </div>
                   </div>
                 ) : (
-                  <div className="text-center py-6 bg-slate-900/30 border border-dashed border-dark-border text-xs text-slate-500 rounded-xl">
-                    No matching student identified in face registry database. (Unknown Person)
+                  <div className="text-center py-5 bg-slate-50 border border-dashed border-slate-200 text-xs text-slate-400 rounded-xl">
+                    No confirmed student identities
                   </div>
                 )}
               </div>
 
-              {/* Evidence visuals */}
-              <div className="space-y-4">
-                <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider block font-mono">Evidence Visuals</span>
-                <div className="grid grid-cols-1 gap-4 font-mono">
-                  {/* Screenshot frame */}
-                  {selectedResult.evidence?.image && (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase">
-                        <div className="flex items-center space-x-1">
-                          <Eye className="h-3 w-3" />
-                          <span>Screenshot Crop Preview</span>
-                        </div>
-                        {selectedResult.evidence.image_id && (
-                          <button
-                            onClick={() => {
-                              setEvidenceToDeleteId(selectedResult.evidence.image_id);
-                              setEvidenceTypeToDelete('image');
-                              setIsEvidenceDeleteModalOpen(true);
-                            }}
-                            className="text-red-500 hover:text-red-400 transition flex items-center space-x-1 font-semibold"
-                            title="Delete Screenshot"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                            <span>Delete</span>
-                          </button>
-                        )}
-                      </div>
-                      <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950 flex justify-center">
-                        <AuthenticatedImage
-                          src={selectedResult.evidence.image}
-                          alt="Screenshot Crop"
-                          className="max-h-48 object-contain"
-                        />
-                      </div>
+              {/* Evidence Screenshot (Video player removed as requested in F5.2) */}
+              {selectedResult.evidence?.image && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase font-mono">
+                    <div className="flex items-center space-x-1">
+                      <Eye className="h-3 w-3" />
+                      <span>Evidence Screenshot</span>
                     </div>
-                  )}
-
-                  {/* Video clip */}
-                  {selectedResult.evidence?.video && (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between text-[10px] font-bold text-slate-400 uppercase">
-                        <div className="flex items-center space-x-1">
-                          <Video className="h-3 w-3" />
-                          <span>Video Clip Recording</span>
-                        </div>
-                        {selectedResult.evidence.video_id && (
-                          <button
-                            onClick={() => {
-                              setEvidenceToDeleteId(selectedResult.evidence.video_id);
-                              setEvidenceTypeToDelete('video');
-                              setIsEvidenceDeleteModalOpen(true);
-                            }}
-                            className="text-red-500 hover:text-red-400 transition flex items-center space-x-1 font-semibold"
-                            title="Delete Video Clip"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                            <span>Delete</span>
-                          </button>
-                        )}
-                      </div>
-                      <div className="border border-dark-border rounded-xl overflow-hidden bg-slate-950">
-                        <video
-                          src={`${API_URL}${selectedResult.evidence.video}`}
-                          controls
-                          className="w-full max-h-48 object-contain"
-                        />
-                      </div>
-                    </div>
-                  )}
+                    {selectedResult.evidence.image_id && (
+                      <button
+                        onClick={() => {
+                          setEvidenceToDeleteId(selectedResult.evidence.image_id);
+                          setIsEvidenceDeleteModalOpen(true);
+                        }}
+                        className="text-red-600 hover:text-red-700 transition flex items-center space-x-1 font-semibold"
+                        title="Delete Screenshot"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                        <span>Delete</span>
+                      </button>
+                    )}
+                  </div>
+                  <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-950 flex justify-center">
+                    <AuthenticatedImage
+                      src={selectedResult.evidence.image}
+                      alt="Incident Evidence Screenshot"
+                      className="max-h-64 object-contain"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* View Incident Link Button */}
+              {(selectedResult.incident_id || selectedResult.id) && (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/events/${selectedResult.incident_id || selectedResult.id}`)}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-4 rounded-xl shadow-sm transition flex items-center justify-center space-x-2 text-sm"
+                  >
+                    <span>View Incident</span>
+                    <ExternalLink className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
             </div>
           ) : (
-            <div className="text-center py-24 text-slate-500 text-xs border border-dashed border-dark-border rounded-2xl bg-dark-card/50">
-              Select a search result item from the listing to view its detailed forensic evidence dossier.
+            <div className="text-center py-24 text-slate-400 text-xs border border-dashed border-slate-200 rounded-2xl bg-white shadow-sm">
+              Select an incident from the search results to inspect its evidence details.
             </div>
           )}
         </div>
@@ -431,13 +708,14 @@ export const Search: React.FC = () => {
 
       <DeleteConfirmationModal
         isOpen={isEvidenceDeleteModalOpen}
-        onClose={() => { setIsEvidenceDeleteModalOpen(false); setEvidenceToDeleteId(null); setEvidenceTypeToDelete(null); }}
+        onClose={() => { setIsEvidenceDeleteModalOpen(false); setEvidenceToDeleteId(null); }}
         onConfirm={() => { if (evidenceToDeleteId) deleteEvidenceMutation.mutate(evidenceToDeleteId); }}
-        title="Delete Forensic Evidence"
-        message="Are you sure you want to permanently delete this evidence file? This action is irreversible."
+        title="Delete Evidence Screenshot"
+        message="Are you sure you want to permanently delete this evidence screenshot? This action is irreversible."
         isLoading={deleteEvidenceMutation.isPending}
       />
     </div>
   );
 };
+
 export default Search;

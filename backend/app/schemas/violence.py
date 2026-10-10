@@ -15,6 +15,8 @@ class InvolvedStudentCard(BaseModel):
     roll_number: Optional[str] = None
     department: Optional[str] = None
     programme: Optional[str] = None
+    year: Optional[int] = None
+    semester: Optional[int] = None
     section: Optional[str] = None
     class_name: Optional[str] = None
     profile_photo_url: Optional[str] = None
@@ -50,6 +52,7 @@ class ViolenceSegment(BaseModel):
     explanation: str
     evidence_image: Optional[str] = None
     evidence_video: Optional[str] = None
+    persons_count: int = 0
     students: List[InvolvedStudentCard] = []
     tracks: List[SegmentTrackInfo] = []
 

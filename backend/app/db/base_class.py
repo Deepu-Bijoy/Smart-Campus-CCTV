@@ -47,8 +47,13 @@ class SqliteCompatibleUUID(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
-        if dialect.name == "sqlite":
-            return str(value)
+        if dialect is None or getattr(dialect, "name", None) == "sqlite":
+            if isinstance(value, _python_uuid.UUID):
+                return str(value)
+            try:
+                return str(_python_uuid.UUID(str(value)))
+            except (ValueError, AttributeError):
+                return str(value)
         return value
 
     def process_result_value(self, value, dialect):
@@ -56,7 +61,10 @@ class SqliteCompatibleUUID(TypeDecorator):
             return None
         if isinstance(value, _python_uuid.UUID):
             return value
-        return _python_uuid.UUID(str(value))
+        try:
+            return _python_uuid.UUID(str(value))
+        except (ValueError, AttributeError):
+            return value
 
 sqlalchemy.dialects.postgresql.UUID = SqliteCompatibleUUID
 sqlalchemy.types.UUID = SqliteCompatibleUUID

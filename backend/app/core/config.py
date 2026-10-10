@@ -49,8 +49,13 @@ class SqliteCompatibleUUID(TypeDecorator):
     def process_bind_param(self, value, dialect):
         if value is None:
             return None
-        if dialect.name == "sqlite":
-            return str(value)
+        if dialect is None or getattr(dialect, "name", None) == "sqlite":
+            if isinstance(value, _python_uuid.UUID):
+                return str(value)
+            try:
+                return str(_python_uuid.UUID(str(value)))
+            except (ValueError, AttributeError):
+                return str(value)
         return value
 
     def process_result_value(self, value, dialect):
@@ -58,7 +63,10 @@ class SqliteCompatibleUUID(TypeDecorator):
             return None
         if isinstance(value, _python_uuid.UUID):
             return value
-        return _python_uuid.UUID(str(value))
+        try:
+            return _python_uuid.UUID(str(value))
+        except (ValueError, AttributeError):
+            return value
 
 sqlalchemy.dialects.postgresql.UUID = SqliteCompatibleUUID
 sqlalchemy.types.UUID = SqliteCompatibleUUID
@@ -157,13 +165,20 @@ class Settings(BaseSettings):
         return self._cached_qdrant_available
 
     @property
+    def STORAGE_DIR(self) -> str:
+        import os
+        backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        return os.path.join(backend_dir, "storage")
+
+    @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
         import os
         test_uri = os.getenv("TEST_DATABASE_URI")
         if test_uri:
             return test_uri
         if self.DB_FALLBACK_SQLITE:
-            return "sqlite+aiosqlite:///./storage/cctv.db"
+            db_path = os.path.join(self.STORAGE_DIR, "cctv.db").replace("\\", "/")
+            return f"sqlite+aiosqlite:///{db_path}"
         return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
 
     # Vector DB
@@ -190,9 +205,6 @@ class Settings(BaseSettings):
     @property
     def CELERY_RESULT_BACKEND(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
-
-    # Storage
-    STORAGE_DIR: str = "storage"
     
     # Face Identification Thresholds
     RECOGNITION_HIGH_THRESHOLD: float = 0.75

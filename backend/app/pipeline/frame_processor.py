@@ -3,7 +3,7 @@ import uuid
 import cv2
 import torch
 import logging
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 from app.core.config import settings
 from app.pipeline.video_reader import VideoReader
 from app.pipeline.detector import YOLOv8Detector
@@ -14,7 +14,14 @@ from app.pipeline.embedder import CLIPEmbedder
 logger = logging.getLogger(__name__)
 
 class FrameProcessor:
-    def __init__(self, video_id: uuid.UUID, file_path: str, target_fps: float = 5.0, camera_id: str = "cam_1"):
+    def __init__(
+        self,
+        video_id: uuid.UUID,
+        file_path: str,
+        target_fps: float = 5.0,
+        camera_id: str = "cam_1",
+        progress_callback: Optional[Callable[[str, int], Any]] = None
+    ):
         self.video_id = video_id
         self.camera_id = camera_id
         self.reader = VideoReader(file_path, target_fps=target_fps)
@@ -22,15 +29,31 @@ class FrameProcessor:
         self.tracker = ByteTrackTracker()
         self.reid_extractor = OSNetReIDExtractor()
         self.clip_embedder = CLIPEmbedder()
+        self.progress_callback = progress_callback
         
         self.crops_dir = os.path.join(settings.STORAGE_DIR, "crops", str(video_id))
         os.makedirs(self.crops_dir, exist_ok=True)
+
+    def _notify_progress(self, stage: str, pct: int) -> None:
+        if not self.progress_callback:
+            return
+        try:
+            self.progress_callback(stage, pct)
+        except Exception as e:
+            from app.tasks.video_tasks import VideoProcessingCancelledException
+            if isinstance(e, VideoProcessingCancelledException):
+                raise
+            logger.warning(f"Error in FrameProcessor progress callback for {self.video_id}: {e}")
 
     def process(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]:
         """
         Processes video frames, detects objects, runs tracking, and extracts Re-ID & CLIP embeddings.
         Returns: (tracks_list, detections_list, reids_list, clips_list, processed_count)
         """
+        from app.tasks.video_tasks import is_video_cancelled, VideoProcessingCancelledException
+        if is_video_cancelled(self.video_id):
+            raise VideoProcessingCancelledException(f"Video {self.video_id} cancelled.")
+
         tracks_map = {}
         detections_list = []
         crops_queue = []
@@ -39,13 +62,27 @@ class FrameProcessor:
         track_last_crop_frame = {}
         
         logger.info(f"Frame extraction, tracking, and embeddings started for video {self.video_id} (Camera: {self.camera_id}).")
+        self._notify_progress("Frame Extraction & Detection", 15)
+
+        estimated_frames = self.reader.estimated_target_frames or 100
+        last_reported_pct = 15
+
         frame_generator = self.reader.read_frames()
         processed_count = 0
         
         for frame_num, timestamp, frame in frame_generator:
+            if is_video_cancelled(self.video_id):
+                raise VideoProcessingCancelledException(f"Video {self.video_id} cancelled.")
+
             persist = processed_count > 0
             result = self.tracker.track_frame(self.detector, frame, persist=persist)
             processed_count += 1
+
+            # Update progress at meaningful intervals (>= 10% delta)
+            frame_pct = min(55, 15 + int((processed_count / max(1, estimated_frames)) * 40))
+            if frame_pct >= last_reported_pct + 10 or processed_count == 1:
+                last_reported_pct = frame_pct
+                self._notify_progress("Detection & Tracking", frame_pct)
             
             if result is None or result.boxes is None:
                 continue
@@ -125,6 +162,7 @@ class FrameProcessor:
                 logger.info(f"Processed {processed_count} frames. Queued crops for embeddings: {len(crops_queue)}")
 
         if crops_queue:
+            self._notify_progress("Embeddings (CLIP)", 65)
             logger.info(f"Extracting CLIP embeddings in batches of 64 for {len(crops_queue)} crops.")
             batch_size = 64
             for i in range(0, len(crops_queue), batch_size):
@@ -154,6 +192,7 @@ class FrameProcessor:
 
         person_crops = [item for item in crops_queue if item["object_class"] == "person"]
         if person_crops:
+            self._notify_progress("Embeddings (OSNet Re-ID)", 72)
             logger.info(f"Extracting OSNet Re-ID embeddings for {len(person_crops)} people crops.")
             batch_size = 64
             for i in range(0, len(person_crops), batch_size):

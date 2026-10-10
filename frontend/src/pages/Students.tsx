@@ -72,12 +72,12 @@ export const Students: React.FC = () => {
     <div className="space-y-8 py-2">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold text-slate-100">Student Directory</h2>
-          <p className="text-slate-400 text-sm">Enrolled targets, class records, and metadata indices</p>
+          <h2 className="text-2xl font-bold text-slate-900">Student Directory</h2>
+          <p className="text-slate-500 text-sm">Enrolled targets, class records, and metadata indices</p>
         </div>
         <button
           onClick={() => setIsModalOpen(true)}
-          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-500 text-white px-5 py-2.5 rounded-xl font-semibold transition text-sm shadow-lg shadow-blue-500/15"
+          className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-xl font-semibold transition text-sm shadow-sm"
         >
           <Plus className="h-4 w-4" />
           <span>Register Student</span>
@@ -108,7 +108,7 @@ export const Students: React.FC = () => {
                 <StudentCard key={student.id} student={student} />
               ))
             ) : (
-              <div className="col-span-full text-center py-12 text-slate-500 text-sm bg-dark-card border border-dark-border rounded-2xl">
+              <div className="col-span-full text-center py-12 text-slate-500 text-sm bg-white border border-slate-200 rounded-2xl shadow-sm">
                 No matching student records found.
               </div>
             )}
@@ -120,15 +120,15 @@ export const Students: React.FC = () => {
               <button
                 onClick={() => setPage(p => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="p-2.5 bg-dark-card border border-dark-border text-slate-300 hover:text-white rounded-lg disabled:opacity-50 transition"
+                className="p-2.5 bg-white border border-slate-200 text-slate-600 hover:text-slate-900 rounded-lg disabled:opacity-40 transition shadow-sm"
               >
                 <ArrowLeft className="h-4 w-4" />
               </button>
-              <span className="text-sm font-semibold text-slate-400">Page {page} of {totalPages}</span>
+              <span className="text-sm font-semibold text-slate-600">Page {page} of {totalPages}</span>
               <button
                 onClick={() => setPage(p => Math.min(totalPages, p + 1))}
                 disabled={page === totalPages}
-                className="p-2.5 bg-dark-card border border-dark-border text-slate-300 hover:text-white rounded-lg disabled:opacity-50 transition"
+                className="p-2.5 bg-white border border-slate-200 text-slate-600 hover:text-slate-900 rounded-lg disabled:opacity-40 transition shadow-sm"
               >
                 <ArrowRight className="h-4 w-4" />
               </button>
@@ -139,26 +139,26 @@ export const Students: React.FC = () => {
 
       {/* Registration Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-dark-card border border-dark-border rounded-2xl max-w-lg w-full p-8 shadow-2xl relative space-y-6">
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full p-8 shadow-xl relative space-y-6">
             <button
               onClick={() => {
                 setIsModalOpen(false);
                 setFormError(null);
                 reset();
               }}
-              className="absolute top-4 right-4 text-slate-400 hover:text-slate-200 transition"
+              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 transition"
             >
               <X className="h-5 w-5" />
             </button>
             
             <div>
-              <h3 className="text-xl font-bold text-slate-100">Enroll Student Profile</h3>
-              <p className="text-slate-400 text-xs">Fill out university enrollment details</p>
+              <h3 className="text-xl font-bold text-slate-900">Enroll Student Profile</h3>
+              <p className="text-slate-500 text-xs">Fill out university enrollment details</p>
             </div>
 
             {formError && (
-              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl flex items-center space-x-2">
+              <div className="p-3 bg-red-50 border border-red-200 text-red-600 text-xs rounded-xl flex items-center space-x-2">
                 <span>{formError}</span>
               </div>
             )}
@@ -166,96 +166,96 @@ export const Students: React.FC = () => {
             <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Full Name</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Full Name</label>
                   <input
                     type="text"
                     {...register('name', { required: 'Name is required' })}
                     placeholder="Jane Doe"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
-                  {errors.name && <span className="text-xs text-red-400">{String(errors.name.message)}</span>}
+                  {errors.name && <span className="text-xs text-red-600">{String(errors.name.message)}</span>}
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Roll Number</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Roll Number</label>
                   <input
                     type="text"
                     {...register('university_roll_number', { required: 'Roll number is required' })}
                     placeholder="UR202611"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
-                  {errors.university_roll_number && <span className="text-xs text-red-400">{String(errors.university_roll_number.message)}</span>}
+                  {errors.university_roll_number && <span className="text-xs text-red-600">{String(errors.university_roll_number.message)}</span>}
                 </div>
               </div>
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Department</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Department</label>
                   <input
                     type="text"
                     {...register('department', { required: 'Department is required' })}
                     placeholder="Computer Science"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
-                  {errors.department && <span className="text-xs text-red-400">{String(errors.department.message)}</span>}
+                  {errors.department && <span className="text-xs text-red-600">{String(errors.department.message)}</span>}
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Programme</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Programme</label>
                   <input
                     type="text"
                     {...register('programme', { required: 'Programme is required' })}
                     placeholder="B.Tech"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
-                  {errors.programme && <span className="text-xs text-red-400">{String(errors.programme.message)}</span>}
+                  {errors.programme && <span className="text-xs text-red-600">{String(errors.programme.message)}</span>}
                 </div>
               </div>
 
               <div className="grid grid-cols-3 gap-4">
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Year</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Year</label>
                   <input
                     type="number"
                     {...register('year', { required: true, valueAsNumber: true })}
                     placeholder="3"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Semester</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Semester</label>
                   <input
                     type="number"
                     {...register('semester', { required: true, valueAsNumber: true })}
                     placeholder="6"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
                 </div>
                 <div className="space-y-1">
-                  <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Section</label>
+                  <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Section</label>
                   <input
                     type="text"
                     {...register('section', { required: 'Section is required' })}
                     placeholder="A"
-                    className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                    className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                   />
-                  {errors.section && <span className="text-xs text-red-400">{String(errors.section.message)}</span>}
+                  {errors.section && <span className="text-xs text-red-600">{String(errors.section.message)}</span>}
                 </div>
               </div>
 
               <div className="space-y-1">
-                <label className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Email Address</label>
+                <label className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider">Email Address</label>
                 <input
                   type="email"
                   {...register('email', { required: 'Email is required' })}
                   placeholder="jane@university.edu"
-                  className="w-full px-3 py-2 bg-slate-900 border border-dark-border rounded-lg text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm"
+                  className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm"
                 />
-                {errors.email && <span className="text-xs text-red-400">{String(errors.email.message)}</span>}
+                {errors.email && <span className="text-xs text-red-600">{String(errors.email.message)}</span>}
               </div>
 
               <button
                 type="submit"
                 disabled={registerMutation.isPending}
-                className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl font-semibold shadow-lg shadow-blue-500/20 transition flex items-center justify-center space-x-2 text-sm pt-2"
+                className="w-full py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold shadow-sm transition flex items-center justify-center space-x-2 text-sm pt-2"
               >
                 {registerMutation.isPending ? (
                   <>

@@ -154,13 +154,15 @@ class EventDetectionEngine:
     async def process_video_events(
         db: AsyncSession,
         video_id: uuid.UUID,
-        camera_id: uuid.UUID
+        camera_id: uuid.UUID,
+        include_violence: bool = False
     ) -> int:
         """
         Executes spatial virtual zone crossing checks and semantic queries in Qdrant 
         to identify incidents, links involved students and evidence, and inserts them.
+        Violence / Fight detection only executes when include_violence is True.
         """
-        logger.info(f"Starting modular incident detection for video {video_id} and camera {camera_id}.")
+        logger.info(f"Starting modular incident detection for video {video_id} and camera {camera_id} (include_violence={include_violence}).")
         
         # 1. Fetch Video and Camera details
         video_stmt = select(Video).filter(Video.id == video_id)
@@ -344,142 +346,155 @@ class EventDetectionEngine:
             vector_store = QdrantVectorStore()
             embedder = CLIPEmbedder()
             
-            # 1. Fight Semantic Checks
-            fight_matches = vector_store.search_by_text(
-                text_query="people fighting, physical altercation, fight, clash, argument",
-                embedder=embedder,
-                limit=15,
-                video_id=str(video_id)
-            )
-            
-            fight_incidents = []
-            for match in fight_matches:
-                score = match["score"]
-                if score < 0.18:
-                    continue
-                payload = match["payload"]
-                t_sec = float(payload.get("timestamp", 0.0))
+            # 1. Fight Semantic Checks (Only executed if explicitly requested by Violence Detection module)
+            if include_violence:
+                fight_matches = vector_store.search_by_text(
+                    text_query="people fighting, physical altercation, fight, clash, argument",
+                    embedder=embedder,
+                    limit=15,
+                    video_id=str(video_id)
+                )
                 
-                # Check duplicate time windows
-                too_close = False
-                for ft in fight_incidents:
-                    if abs(ft - t_sec) < 10.0:
-                        too_close = True
-                        break
-                if too_close:
-                    continue
-                
-                # Compute multi-signal score
-                fight_score, breakdown = fight_detector.analyze(tracks, score, t_sec)
-                logger.info(f"Fight multi-signal analysis at {t_sec}s: score={fight_score:.3f}, breakdown={breakdown}")
-                
-                if fight_score < 0.30:
-                    logger.info("Fight multi-signal threshold not met. Bypassing event creation.")
-                    continue
+                fight_incidents = []
+                all_fight_identified_students = set()
+                for match in fight_matches:
+                    score = match["score"]
+                    if score < 0.18:
+                        continue
+                    payload = match["payload"]
+                    t_sec = float(payload.get("timestamp", 0.0))
                     
-                fight_incidents.append(t_sec)
-                incident_time = video.created_at + timedelta(seconds=t_sec)
-                track_id = uuid.UUID(payload["track_id"]) if "track_id" in payload else None
-                
-                incident_id = uuid.uuid4()
-                incident = Incident(
-                    id=incident_id,
-                    incident_type="Fight",
-                    timestamp=incident_time,
-                    camera_id=camera_id,
-                    confidence=fight_score,
-                    explanation=(
-                        f"Detected physical fight/altercation at {t_sec:.1f}s on camera {camera_name}. "
-                        f"Multi-signal breakdown: Motion dynamics: {breakdown['motion_dynamics']:.2f}, "
-                        f"Interaction proximity: {breakdown['person_interaction']:.2f}, CLIP score: {breakdown['clip_similarity']:.2f}."
-                    )
-                )
-                db.add(incident)
-
-                # Create DetectedEvent
-                det_event = DetectedEvent(
-                    id=uuid.uuid4(),
-                    incident_id=incident_id,
-                    event_type="FIGHT",
-                    camera_id=camera_id,
-                    video_id=video_id,
-                    timestamp=incident_time,
-                    track_id=track_id,
-                    confidence=fight_score
-                )
-                db.add(det_event)
-
-                # Resolve all involved students for tracks in this video around timestamp
-                persons_identified_count = 0
-                for trk in tracks:
-                    rec_stmt = (
-                        select(StudentRecognitionEvent)
-                        .filter(StudentRecognitionEvent.track_id == trk.id)
-                        .order_by(StudentRecognitionEvent.similarity_score.desc())
-                    )
-                    rec_res = await db.execute(rec_stmt)
-                    rec_event = rec_res.scalars().first()
-                    if rec_event:
-                        # Ensure duplicate student not added
-                        existing_ip = await db.execute(
-                            select(IncidentPerson).filter(
-                                IncidentPerson.incident_id == incident_id,
-                                IncidentPerson.student_id == rec_event.student_id
-                            )
+                    # Check duplicate time windows
+                    too_close = False
+                    for ft in fight_incidents:
+                        if abs(ft - t_sec) < 10.0:
+                            too_close = True
+                            break
+                    if too_close:
+                        continue
+                    
+                    # Compute multi-signal score
+                    fight_score, breakdown = fight_detector.analyze(tracks, score, t_sec)
+                    logger.info(f"Fight multi-signal analysis at {t_sec}s: score={fight_score:.3f}, breakdown={breakdown}")
+                    
+                    if fight_score < 0.30:
+                        logger.info("Fight multi-signal threshold not met. Bypassing event creation.")
+                        continue
+                        
+                    fight_incidents.append(t_sec)
+                    incident_time = video.created_at + timedelta(seconds=t_sec)
+                    track_id = uuid.UUID(payload["track_id"]) if "track_id" in payload else None
+                    
+                    incident_id = uuid.uuid4()
+                    incident = Incident(
+                        id=incident_id,
+                        incident_type="Fight",
+                        timestamp=incident_time,
+                        camera_id=camera_id,
+                        confidence=fight_score,
+                        explanation=(
+                            f"Detected physical fight/altercation at {t_sec:.1f}s on camera {camera_name}. "
+                            f"Multi-signal breakdown: Motion dynamics: {breakdown['motion_dynamics']:.2f}, "
+                            f"Interaction proximity: {breakdown['person_interaction']:.2f}, CLIP score: {breakdown['clip_similarity']:.2f}."
                         )
-                        if not existing_ip.scalars().first():
-                            inc_person = IncidentPerson(
-                                id=uuid.uuid4(),
-                                incident_id=incident_id,
-                                student_id=rec_event.student_id,
-                                confidence=rec_event.similarity_score
+                    )
+                    db.add(incident)
+
+                    # Create DetectedEvent
+                    det_event = DetectedEvent(
+                        id=uuid.uuid4(),
+                        incident_id=incident_id,
+                        event_type="FIGHT",
+                        camera_id=camera_id,
+                        video_id=video_id,
+                        timestamp=incident_time,
+                        track_id=track_id,
+                        confidence=fight_score
+                    )
+                    db.add(det_event)
+
+                    # Resolve all involved students for tracks in this video around timestamp
+                    persons_identified_count = 0
+                    for trk in tracks:
+                        rec_stmt = (
+                            select(StudentRecognitionEvent)
+                            .filter(StudentRecognitionEvent.track_id == trk.id)
+                            .order_by(StudentRecognitionEvent.similarity_score.desc())
+                        )
+                        rec_res = await db.execute(rec_stmt)
+                        rec_event = rec_res.scalars().first()
+                        if rec_event:
+                            # Ensure duplicate student not added
+                            existing_ip = await db.execute(
+                                select(IncidentPerson).filter(
+                                    IncidentPerson.incident_id == incident_id,
+                                    IncidentPerson.student_id == rec_event.student_id
+                                )
                             )
-                            db.add(inc_person)
-                            persons_identified_count += 1
+                            if not existing_ip.scalars().first():
+                                inc_person = IncidentPerson(
+                                    id=uuid.uuid4(),
+                                    incident_id=incident_id,
+                                    student_id=rec_event.student_id,
+                                    confidence=rec_event.similarity_score
+                                )
+                                db.add(inc_person)
+                                persons_identified_count += 1
+                                all_fight_identified_students.add(rec_event.student_id)
 
-                # Generate Evidence (Representative screenshot frame and video clip)
-                frame_filename = f"evidence_frame_{incident_id.hex}.jpg"
-                frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
-                frame_success = extract_evidence_frame(video.file_path, t_sec, frame_path)
-                screenshot_path = frame_path if frame_success else (payload.get("crop_path") if payload.get("crop_path") and os.path.exists(payload.get("crop_path")) else None)
-                if screenshot_path:
-                    ev_screen = Evidence(
-                        id=uuid.uuid4(),
-                        incident_id=incident_id,
-                        evidence_type="screenshot",
-                        file_path=screenshot_path,
-                        timestamp=incident_time
-                    )
-                    db.add(ev_screen)
+                    # Generate Evidence (Representative screenshot frame and video clip)
+                    frame_filename = f"evidence_frame_{incident_id.hex}.jpg"
+                    frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
+                    frame_success = extract_evidence_frame(video.file_path, t_sec, frame_path)
+                    screenshot_path = frame_path if frame_success else (payload.get("crop_path") if payload.get("crop_path") and os.path.exists(payload.get("crop_path")) else None)
+                    if screenshot_path:
+                        ev_screen = Evidence(
+                            id=uuid.uuid4(),
+                            incident_id=incident_id,
+                            evidence_type="screenshot",
+                            file_path=screenshot_path,
+                            timestamp=incident_time
+                        )
+                        db.add(ev_screen)
 
-                # Cut H.264 Video Sub-clip
-                clip_filename = f"clip_{incident_id.hex}.mp4"
-                clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
-                clip_success = generate_subclip(video.file_path, t_sec, 6.0, clip_path)
-                if clip_success:
-                    ev_video = Evidence(
-                        id=uuid.uuid4(),
-                        incident_id=incident_id,
-                        evidence_type="video",
-                        file_path=clip_path,
-                        timestamp=incident_time
-                    )
-                    db.add(ev_video)
+                    # Cut H.264 Video Sub-clip
+                    clip_filename = f"clip_{incident_id.hex}.mp4"
+                    clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
+                    clip_success = generate_subclip(video.file_path, t_sec, 6.0, clip_path)
+                    if clip_success:
+                        ev_video = Evidence(
+                            id=uuid.uuid4(),
+                            incident_id=incident_id,
+                            evidence_type="video",
+                            file_path=clip_path,
+                            timestamp=incident_time
+                        )
+                        db.add(ev_video)
 
-                incidents_created += 1
+                    incidents_created += 1
 
-                # Dispatch real-time security alert for detected fight / violence
-                try:
-                    from app.services.alert_dispatcher import AlertDispatcher
-                    await AlertDispatcher.dispatch_alert(
-                        db=db,
-                        event_type="VIOLENCE",
-                        camera_name=camera_name,
-                        confidence="high",
-                        persons_identified_count=persons_identified_count
-                    )
-                except Exception as ex:
-                    logger.warning(f"Could not dispatch violence alert notification: {ex}")
+                # Dispatch ONE consolidated real-time security alert for detected fight / violence per source video
+                if fight_incidents:
+                    try:
+                        from app.services.alert_dispatcher import AlertDispatcher
+                        earliest_t = min(fight_incidents)
+                        mins = int(earliest_t // 60)
+                        secs = int(earliest_t % 60)
+                        timestamp_str = f"{mins:02d}:{secs:02d}"
+                        video_filename = video.original_filename or (os.path.basename(video.file_path) if video.file_path else "CCTV Video")
+                        run_id = video.processing_started_at.strftime("%Y%m%d%H%M%S") if hasattr(video, "processing_started_at") and video.processing_started_at else None
+                        await AlertDispatcher.dispatch_violence_alert(
+                            db=db,
+                            video_id=video_id,
+                            video_filename=video_filename,
+                            camera_name=camera_name,
+                            incident_count=len(fight_incidents),
+                            persons_identified_count=len(all_fight_identified_students),
+                            earliest_timestamp_str=timestamp_str,
+                            run_id=run_id
+                        )
+                    except Exception as ex:
+                        logger.warning(f"Could not dispatch consolidated violence alert notification: {ex}")
 
             # 2. Suspicious Activity Semantic Checks
             susp_matches = vector_store.search_by_text(

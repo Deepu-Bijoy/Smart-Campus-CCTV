@@ -84,5 +84,5 @@ class DetectedEvent(Base):
 
     incident = relationship("Incident", back_populates="events")
     camera = relationship("Camera", backref="detected_events")
-    video = relationship("Video", backref="detected_events")
-    track = relationship("Track", backref="detected_events")
+    video = relationship("Video", back_populates="detected_events", passive_deletes=True)
+    track = relationship("Track", backref="detected_events", passive_deletes=True)

@@ -32,8 +32,16 @@ async def get_dashboard_metrics(
     """
     try:
         videos_count = (await db.execute(select(func.count(Video.id)))).scalar() or 0
-        tracks_count = (await db.execute(select(func.count(Track.id)))).scalar() or 0
-        detections_count = (await db.execute(select(func.count(Detection.id)))).scalar() or 0
+        tracks_count = (await db.execute(
+            select(func.count(Track.id)).filter(Track.video_id.in_(select(Video.id)))
+        )).scalar() or 0
+        detections_count = (await db.execute(
+            select(func.count(Detection.id)).filter(
+                Detection.track_id.in_(
+                    select(Track.id).filter(Track.video_id.in_(select(Video.id)))
+                )
+            )
+        )).scalar() or 0
         students_count = (await db.execute(select(func.count(Student.id)))).scalar() or 0
         embeddings_count = (await db.execute(select(func.count(StudentFaceEmbedding.id)))).scalar() or 0
         
@@ -464,6 +472,16 @@ class IdentitySearchRequest(BaseModel):
     query: str
     camera_id: Optional[str] = None
 
+def _format_seconds_to_hhmmss(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "00:00:00"
+    total_sec = max(0, int(round(seconds)))
+    h = total_sec // 3600
+    m = (total_sec % 3600) // 60
+    s = total_sec % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
 @router.post("/investigations/search/identity")
 async def search_identity(
     request: IdentitySearchRequest,
@@ -478,7 +496,7 @@ async def search_identity(
 
     # 1. Extract student name token by stripping prefix keywords
     name_query = query.strip().rstrip("?.!")
-    for prefix in ["find all appearances of", "find appearances of", "where was", "seen near", "seen", "find", "show"]:
+    for prefix in ["find all appearances of", "find appearances of", "where was", "seen near", "seen", "find", "show", "who is"]:
         if name_query.lower().startswith(prefix):
             name_query = name_query[len(prefix):].strip()
     for suffix in ["seen near", "seen"]:
@@ -487,7 +505,9 @@ async def search_identity(
 
     # 2. Resolve Student from database
     from app.models.student import Student
-    stmt = select(Student).filter(
+    from sqlalchemy.orm import selectinload
+    from app.api.v1.events import _build_student_academic_detail
+    stmt = select(Student).options(selectinload(Student.photos)).filter(
         (Student.name.ilike(f"%{name_query}%")) | 
         (Student.university_roll_number.ilike(f"%{name_query}%"))
     )
@@ -510,75 +530,142 @@ async def search_identity(
     if request.camera_id:
         ev_stmt = ev_stmt.filter(StudentRecognitionEvent.camera_id == str(request.camera_id))
         
-    ev_stmt = ev_stmt.order_by(StudentRecognitionEvent.timestamp.desc())
+    ev_stmt = ev_stmt.order_by(StudentRecognitionEvent.timestamp.asc())
     ev_res = await db.execute(ev_stmt)
     events = ev_res.scalars().all()
 
-    # 4. Construct appearance timeline with crops and videos
+    # 4. Group repeated detections within the same source video and camera,
+    # selecting the earliest valid detection and corresponding thumbnail evidence
     from app.models.camera import Camera
     from app.models.video import Video
-    from app.models.track import PersonReid
+    from app.models.track import PersonReid, Detection, Track
+
+    # Pre-fetch referenced videos
+    video_ids = list({ev.video_id for ev in events if ev.video_id})
+    videos_map = {}
+    if video_ids:
+        v_res = await db.execute(select(Video).filter(Video.id.in_(video_ids)))
+        for v in v_res.scalars().all():
+            videos_map[v.id] = v
+
+    # Group events by (video_id, effective_camera_id)
+    groups: Dict[tuple, List[StudentRecognitionEvent]] = {}
+    for ev in events:
+        vid = ev.video_id
+        cam_id = ev.camera_id
+        if not cam_id and vid in videos_map and videos_map[vid].camera_id:
+            cam_id = str(videos_map[vid].camera_id)
+        group_key = (vid, cam_id)
+        if group_key not in groups:
+            groups[group_key] = []
+        groups[group_key].append(ev)
 
     appearances = []
-    for ev in events:
+    for (vid, cam_id), group_events in groups.items():
+        video = videos_map.get(vid)
+        source_video = (video.original_filename or video.filename) if video else None
+        video_url = None
+        if video and video.file_path:
+            v_url = video.file_path.replace("\\", "/")
+            if "storage/" in v_url:
+                video_url = "/" + v_url[v_url.find("storage/"):]
+            else:
+                video_url = v_url
+
         # Resolve Camera details
         camera_display = "Unknown Camera"
-        if ev.camera_id:
+        if cam_id:
             try:
-                cam_uuid = uuid.UUID(ev.camera_id)
+                cam_uuid = uuid.UUID(str(cam_id))
                 cam_stmt = select(Camera).filter(Camera.id == cam_uuid)
             except ValueError:
-                cam_stmt = select(Camera).filter((Camera.name == ev.camera_id) | (Camera.location == ev.camera_id))
-                
+                cam_stmt = select(Camera).filter((Camera.name == str(cam_id)) | (Camera.location == str(cam_id)))
             cam_res = await db.execute(cam_stmt)
-            camera = cam_res.scalars().first()
-            if camera:
-                camera_display = f"{camera.name} ({camera.location})"
+            camera_obj = cam_res.scalars().first()
+            if camera_obj:
+                camera_display = f"{camera_obj.name} ({camera_obj.location})" if camera_obj.location else camera_obj.name
             else:
-                camera_display = ev.camera_id
+                camera_display = str(cam_id)
 
-        # Resolve Video details
-        video_url = None
-        vid_stmt = select(Video).filter(Video.id == ev.video_id)
-        vid_res = await db.execute(vid_stmt)
-        video = vid_res.scalars().first()
-        if video:
-            video_url = video.file_path.replace("\\", "/")
-            if "storage/" in video_url:
-                video_url = "/" + video_url[video_url.find("storage/"):]
+        # Collect all tracks for this group
+        group_track_ids = list({ev.track_id for ev in group_events if ev.track_id})
 
-        # Resolve PersonReid crop path for evidence frame
+        reids = []
+        dets = []
+        tracks = []
+        if group_track_ids:
+            reid_stmt = (
+                select(PersonReid)
+                .filter(PersonReid.track_id.in_(group_track_ids))
+                .order_by(PersonReid.timestamp_seconds.asc())
+            )
+            reid_res = await db.execute(reid_stmt)
+            reids = reid_res.scalars().all()
+
+            det_stmt = (
+                select(Detection)
+                .filter(Detection.track_id.in_(group_track_ids))
+                .order_by(Detection.timestamp_seconds.asc())
+            )
+            det_res = await db.execute(det_stmt)
+            dets = det_res.scalars().all()
+
+            track_stmt = (
+                select(Track)
+                .filter(Track.id.in_(group_track_ids))
+                .order_by(Track.start_time.asc())
+            )
+            t_res = await db.execute(track_stmt)
+            tracks = t_res.scalars().all()
+
+        # Find earliest valid source-video detection timestamp (video-relative)
+        valid_times = []
+        if reids and reids[0].timestamp_seconds is not None:
+            valid_times.append(float(reids[0].timestamp_seconds))
+        if dets and dets[0].timestamp_seconds is not None:
+            valid_times.append(float(dets[0].timestamp_seconds))
+        if tracks and tracks[0].start_time is not None:
+            valid_times.append(float(tracks[0].start_time))
+
+        earliest_sec = min(valid_times) if valid_times else 0.0
+        time_str = _format_seconds_to_hhmmss(earliest_sec)
+
+        # Pick evidence crop corresponding to earliest detection
         crop_url = None
-        reid_stmt = select(PersonReid).filter(PersonReid.track_id == ev.track_id).order_by(PersonReid.timestamp_seconds.asc())
-        reid_res = await db.execute(reid_stmt)
-        reids = reid_res.scalars().all()
-        if reids:
-            # Pick first available crop as key frame crop path
-            crop_path = reids[0].crop_path
-            crop_url = crop_path.replace("\\", "/")
-            if "storage/" in crop_url:
-                crop_url = "/" + crop_url[crop_url.find("storage/"):]
+        for r in reids:
+            if r.crop_path:
+                c_url = r.crop_path.replace("\\", "/")
+                if "storage/" in c_url:
+                    crop_url = "/" + c_url[c_url.find("storage/"):]
+                else:
+                    crop_url = c_url
+                break
 
-        time_str = ev.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        best_confidence = max([float(ev.similarity_score) for ev in group_events if ev.similarity_score is not None] or [0.9])
+        earliest_track_id = str(reids[0].track_id if reids else (group_events[0].track_id or uuid.uuid4()))
+
         appearances.append({
             "camera": camera_display,
+            "camera_name": camera_display,
             "timestamp": time_str,
-            "track_id": str(ev.track_id),
-            "recognition_confidence": float(ev.similarity_score),
-            "video_id": str(ev.video_id),
+            "first_detection_timestamp": time_str,
+            "timestamp_seconds": float(earliest_sec),
+            "track_id": earliest_track_id,
+            "recognition_confidence": float(best_confidence),
+            "video_id": str(vid) if vid else None,
+            "source_video": source_video,
             "evidence": {
                 "image": crop_url,
                 "video": video_url
             }
         })
 
+    # Sort appearances chronologically by source video and earliest timestamp
+    appearances.sort(key=lambda x: (x.get("source_video") or "", x.get("timestamp_seconds", 0.0)))
+
     return {
         "type": "identity",
-        "student": {
-            "name": student.name,
-            "class": f"{student.programme} {student.section}",
-            "roll_number": student.university_roll_number
-        },
+        "student": _build_student_academic_detail(student),
         "appearances": appearances
     }
 
@@ -687,16 +774,14 @@ async def search_appearance(
         if rec_event and rec_event.similarity_score >= 0.60:
             # Verified biometrics
             face_confidence = float(rec_event.similarity_score)
-            std_stmt = select(Student).filter(Student.id == rec_event.student_id)
+            from sqlalchemy.orm import selectinload
+            from app.api.v1.events import _build_student_academic_detail
+            std_stmt = select(Student).options(selectinload(Student.photos)).filter(Student.id == rec_event.student_id)
             std_res = await db.execute(std_stmt)
             student = std_res.scalars().first()
             if student:
                 identity_status = "Identified"
-                student_data = {
-                    "name": student.name,
-                    "class": f"{student.programme} {student.section}",
-                    "roll_number": student.university_roll_number
-                }
+                student_data = _build_student_academic_detail(student)
                 identity_bonus = 0.05 * face_confidence
 
         # C. Calculate final ranked Appearance score
@@ -720,13 +805,14 @@ async def search_appearance(
 
         # E. Format Video details
         video_url = None
+        video_obj = None
         vid_id = payload.get("video_id")
         if vid_id:
             vid_stmt = select(Video).filter(Video.id == uuid.UUID(vid_id))
             vid_res = await db.execute(vid_stmt)
-            video = vid_res.scalars().first()
-            if video:
-                video_url = video.file_path.replace("\\", "/")
+            video_obj = vid_res.scalars().first()
+            if video_obj:
+                video_url = video_obj.file_path.replace("\\", "/")
                 if "storage/" in video_url:
                     video_url = "/" + video_url[video_url.find("storage/"):]
 
@@ -744,9 +830,12 @@ async def search_appearance(
         h, m = divmod(m, 60)
         time_str = f"{h:02d}:{m:02d}:{s:02d}"
 
+        source_video = (video_obj.original_filename or video_obj.filename) if video_obj else None
+
         results.append({
             "track_id": t_id,
             "camera_name": camera_display,
+            "source_video": source_video,
             "timestamp": time_str,
             "semantic_score": clip_score,
             "osnet_score": osnet_similarity,
@@ -754,19 +843,46 @@ async def search_appearance(
             "final_score": final_score,
             "identity_status": identity_status,
             "student": student_data,
+            "students": [student_data] if student_data else [],
             "evidence": {
                 "image": crop_url,
                 "video": video_url
             }
         })
 
+    # Deduplicate repeated detections of the same verified student within the same source video and camera
+    deduped_results = []
+    seen_student_video_cam = {}
+
+    for item in results:
+        std = item.get("student")
+        std_id = std.get("id") or std.get("student_id") if std else None
+
+        if std_id:
+            dedup_key = (str(std_id), item.get("source_video"), item.get("camera_name"))
+            if dedup_key in seen_student_video_cam:
+                idx = seen_student_video_cam[dedup_key]
+                existing_item = deduped_results[idx]
+                existing_ts = existing_item.get("timestamp") or "99:99:99"
+                new_ts = item.get("timestamp") or "99:99:99"
+                if new_ts < existing_ts:
+                    deduped_results[idx] = item
+                elif new_ts == existing_ts and item.get("final_score", 0.0) > existing_item.get("final_score", 0.0):
+                    deduped_results[idx] = item
+            else:
+                seen_student_video_cam[dedup_key] = len(deduped_results)
+                deduped_results.append(item)
+        else:
+            # Unknown person: keep separate by track
+            deduped_results.append(item)
+
     # Sort results by final ranking score descending
-    results.sort(key=lambda x: x["final_score"], reverse=True)
+    deduped_results.sort(key=lambda x: x["final_score"], reverse=True)
 
     return {
         "type": "appearance",
         "query": query,
-        "results": results
+        "results": deduped_results
     }
 
 
@@ -788,6 +904,25 @@ async def unified_search(
     # 1. Classify the query using query_router classifier
     from app.services.query_router import classify_query
     query_type = classify_query(query)
+
+    # If classified as appearance or default, check if query matches an enrolled student name or roll number
+    if query_type != "incident":
+        clean_name = query.strip().rstrip("?.!")
+        for prefix in ["find all appearances of", "find appearances of", "where was", "seen near", "seen", "find", "show", "who is"]:
+            if clean_name.lower().startswith(prefix):
+                clean_name = clean_name[len(prefix):].strip()
+        for suffix in ["seen near", "seen"]:
+            if clean_name.lower().endswith(suffix):
+                clean_name = clean_name[:-len(suffix)].strip()
+        if clean_name:
+            std_check = await db.execute(
+                select(Student.id).filter(
+                    (Student.name.ilike(f"%{clean_name}%")) |
+                    (Student.university_roll_number.ilike(f"%{clean_name}%"))
+                )
+            )
+            if std_check.scalars().first():
+                query_type = "identity"
     
     unified_results = []
     
@@ -796,12 +931,28 @@ async def unified_search(
         search_req = IdentitySearchRequest(query=query, camera_id=request.camera_id)
         id_res = await search_identity(search_req, db, current_user)
         student_data = id_res["student"]
+        std_name = student_data["name"] if student_data else "Student"
         
         for app_item in id_res["appearances"]:
+            cam_str = app_item.get("camera_name") or app_item.get("camera") or "Campus Camera"
+            time_display = app_item.get("timestamp") or "00:00:00"
+            vid_id_str = str(app_item.get("video_id") or "")
+            
             unified_results.append({
+                "id": f"identity_{student_data['id'] if student_data else uuid.uuid4()}_{vid_id_str}_{cam_str}",
+                "title": f"Student Identified — {std_name}",
+                "incident_type": "Student Identified",
+                "severity": "Low",
+                "source_video": app_item.get("source_video") or "Source video unavailable",
+                "video_id": app_item.get("video_id"),
+                "detected_at": time_display,
+                "first_detection_timestamp": time_display,
+                "timestamp": time_display,
+                "timestamp_seconds": app_item.get("timestamp_seconds", 0.0),
                 "student": student_data,
-                "camera": app_item["camera"],
-                "timestamp": app_item["timestamp"],
+                "students": [student_data] if student_data else [],
+                "camera": cam_str,
+                "camera_name": cam_str,
                 "confidence": app_item["recognition_confidence"],
                 "match_reason": f"Matched because ArcFace recognition confidence was {app_item['recognition_confidence']:.2f}",
                 "evidence": app_item["evidence"]
@@ -813,12 +964,28 @@ async def unified_search(
         app_res = await search_appearance(search_req, db, current_user)
         
         for track_item in app_res["results"]:
+            std_obj = track_item.get("student")
+            std_name = std_obj.get("name") if std_obj else None
+            title = f"Student Identified — {std_name}" if std_name else "Person Detected — Appearance Match"
+            time_display = track_item.get("timestamp") or "00:00:00"
+            cam_str = track_item.get("camera_name") or "Campus Camera"
+            
             unified_results.append({
-                "student": track_item["student"],
-                "camera": track_item["camera_name"],
-                "timestamp": track_item["timestamp"],
-                "confidence": track_item["final_score"],
-                "match_reason": f"Matched because CLIP similarity {track_item['semantic_score']:.2f} and OSNet appearance similarity {track_item['osnet_score']:.2f}",
+                "id": str(track_item.get("track_id") or uuid.uuid4()),
+                "title": title,
+                "incident_type": "Student Identified" if std_obj else "Person Appearance",
+                "severity": "Low",
+                "source_video": track_item.get("source_video") or "Source video unavailable",
+                "video_id": track_item.get("video_id"),
+                "detected_at": time_display,
+                "first_detection_timestamp": time_display,
+                "timestamp": time_display,
+                "student": std_obj,
+                "students": track_item.get("students") or ([std_obj] if std_obj else []),
+                "camera": cam_str,
+                "camera_name": cam_str,
+                "confidence": track_item.get("final_score", 0.8),
+                "match_reason": f"Matched because CLIP similarity {track_item.get('semantic_score', 0.0):.2f} and OSNet appearance similarity {track_item.get('osnet_score', 0.0):.2f}",
                 "evidence": track_item["evidence"]
             })
             
@@ -834,54 +1001,84 @@ async def unified_search(
                 pass
         inc_results = await IncidentInvestigationQueryEngine.query_incidents(db, query, camera_id=cam_uuid)
         
-        for inc_item in inc_results:
-            student_data = None
-            all_students = []
-            
-            # Populate all identified engaged students from persons list
-            if inc_item.get("persons"):
-                for p in inc_item["persons"]:
-                    if p.get("identity_status") == "Identified":
-                        s_info = {
-                            "name": p["name"],
-                            "class": p["class_name"],
-                            "roll_number": p["roll_number"],
-                            "department": p.get("department", "N/A")
-                        }
-                        all_students.append(s_info)
-                        if not student_data:
-                            student_data = s_info
+        seen_incident_ids = set()
+        seen_signatures = set()
 
-            if not student_data and inc_item["person"]["identity_status"] == "Identified":
-                student_data = {
-                    "name": inc_item["person"]["name"],
-                    "class": inc_item["person"]["class_name"],
-                    "roll_number": inc_item["person"]["roll_number"],
-                    "department": inc_item["person"].get("department", "N/A")
-                }
-                all_students.append(student_data)
+        for inc_item in inc_results:
+            inc_id = str(inc_item.get("id") or inc_item.get("incident_id") or "")
+            if inc_id and inc_id in seen_incident_ids:
+                continue
+            if inc_id:
+                seen_incident_ids.add(inc_id)
+
+            # Deduplicate near-duplicate entries for the same source video and temporal window
+            sig = (
+                inc_item.get("source_video"),
+                inc_item.get("detected_at"),
+                inc_item.get("incident_interval"),
+                inc_item.get("incident_type")
+            )
+            if (inc_item.get("source_video") or inc_item.get("detected_at")) and sig in seen_signatures:
+                continue
+            if inc_item.get("source_video") or inc_item.get("detected_at"):
+                seen_signatures.add(sig)
+
+            all_students = inc_item.get("persons") or []
+            primary_student = all_students[0] if all_students else inc_item.get("person")
             
-            time_display = f"{inc_item['timestamp']['date']} {inc_item['timestamp']['time']}"
-            
-            # Format match reason to explicitly list engaged students
-            if all_students:
-                names_formatted = ", ".join([f"{s['name']} (Roll: {s['roll_number']})" for s in all_students])
-                match_reason = f"Detected {inc_item['incident_type'].lower()} incident. Engaged student(s) identified from directory: {names_formatted}. {inc_item['explanation']}"
+            # Format clean title
+            inc_type_raw = inc_item.get("incident_type") or "Incident"
+            if inc_type_raw.lower() in ["violence", "fight"]:
+                title = "Violence detected — Fight"
             else:
-                match_reason = inc_item["explanation"]
+                title = f"{inc_type_raw} detected"
+
+            time_display = inc_item.get("detected_at") or (
+                f"{inc_item['timestamp']['date']} {inc_item['timestamp']['time']}" if isinstance(inc_item.get("timestamp"), dict) else "Timestamp unavailable"
+            )
+            
+            # Match reason
+            if all_students:
+                names_formatted = ", ".join([f"{s['name']} (Roll: {s.get('roll_number', 'N/A')})" for s in all_students])
+                match_reason = f"Detected {inc_type_raw.lower()} incident. Confirmed student(s): {names_formatted}."
+            else:
+                match_reason = inc_item.get("explanation") or f"Detected {inc_type_raw.lower()} incident."
+
+            camera_display = "Campus Camera"
+            camera_name = "Campus Camera"
+            if inc_item.get("camera"):
+                if isinstance(inc_item["camera"], dict):
+                    c_name = inc_item["camera"].get("name") or "Campus Camera"
+                    c_loc = inc_item["camera"].get("location")
+                    camera_display = f"{c_name} ({c_loc})" if c_loc else c_name
+                    camera_name = c_name
+                else:
+                    camera_display = str(inc_item["camera"])
+                    camera_name = str(inc_item["camera"])
 
             unified_results.append({
-                "student": student_data,
+                "id": inc_id or str(uuid.uuid4()),
+                "incident_id": inc_id,
+                "incident_type": inc_type_raw,
+                "title": title,
+                "severity": inc_item.get("severity", "Medium"),
+                "source_video": inc_item.get("source_video"),
+                "video_id": inc_item.get("video_id"),
+                "detected_at": inc_item.get("detected_at") or "Timestamp unavailable",
+                "incident_interval": inc_item.get("incident_interval"),
+                "student": primary_student,
                 "students": all_students,
-                "camera": f"{inc_item['camera']['name']} ({inc_item['camera']['location']})",
+                "camera": camera_display,
+                "camera_name": camera_name,
                 "timestamp": time_display,
-                "confidence": float(inc_item["confidence"]["event_confidence"]),
+                "confidence": float(inc_item["confidence"]["event_confidence"]) if isinstance(inc_item.get("confidence"), dict) else 0.9,
                 "match_reason": match_reason,
+                "explanation": inc_item.get("explanation"),
                 "evidence": {
-                    "image": inc_item["evidence"]["screenshot"],
-                    "image_id": inc_item["evidence"].get("screenshot_id"),
-                    "video": inc_item["evidence"]["video_clip"],
-                    "video_id": inc_item["evidence"].get("video_clip_id")
+                    "image": inc_item["evidence"]["screenshot"] if inc_item.get("evidence") else None,
+                    "image_id": inc_item["evidence"].get("screenshot_id") if inc_item.get("evidence") else None,
+                    "video": inc_item["evidence"]["video_clip"] if inc_item.get("evidence") else None,
+                    "video_id": inc_item["evidence"].get("video_clip_id") if inc_item.get("evidence") else None
                 }
             })
 

@@ -49,11 +49,33 @@ class VideoProcessingOrchestrator:
         
         # Stage 2, 3, 4 & 5: Frame Extraction, YOLO, ByteTrack, OSNet, CLIP in FrameProcessor
         stage_proc_start = time.time()
-        await self.progress_callback("Processing Video (Detection, Tracking, Re-ID & CLIP)", 20)
-        
-        processor = FrameProcessor(video.id, video.file_path, target_fps=5.0, camera_id=camera_id)
-        
-        loop = asyncio.get_event_loop()
+        await self.progress_callback("Frame Extraction", 15)
+
+        # Ensure no open transactions on self.db while FrameProcessor runs
+        await self.db.commit()
+
+        loop = asyncio.get_running_loop()
+
+        def sync_progress_callback(stage: str, percentage: int):
+            from app.tasks.video_tasks import is_video_cancelled, VideoProcessingCancelledException
+            if is_video_cancelled(video.id):
+                raise VideoProcessingCancelledException(f"Video {video.id} cancelled.")
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self.progress_callback(stage, percentage), loop)
+                fut.result(timeout=5)
+            except VideoProcessingCancelledException:
+                raise
+            except Exception as e:
+                logger.warning(f"Failed to report sync progress for video {video.id}: {e}")
+
+        processor = FrameProcessor(
+            video.id,
+            video.file_path,
+            target_fps=5.0,
+            camera_id=camera_id,
+            progress_callback=sync_progress_callback
+        )
+
         tracks_list, detections_list, reids_list, clips_list, frames_processed = await loop.run_in_executor(None, processor.process)
         stage_proc_time = time.time() - stage_proc_start
 
@@ -91,6 +113,17 @@ class VideoProcessingOrchestrator:
 
         await self.progress_callback("Processing Video (Detection, Tracking & Re-ID) Completed", 75)
         
+        # Check if video was cancelled or deleted
+        from app.tasks.video_tasks import is_video_cancelled
+        if is_video_cancelled(video.id):
+            logger.info(f"Video {video.id} was cancelled during frame processing. Halting orchestration.")
+            return
+
+        v_check = await self.db.execute(select(Video.id).filter(Video.id == video.id))
+        if not v_check.scalar():
+            logger.info(f"Video {video.id} no longer exists in DB. Halting orchestration.")
+            return
+
         # Stage 6: Face Recognition
         stage6_start = time.time()
         logger.info("Stage 6: Face Recognition started.")
@@ -191,6 +224,17 @@ class VideoProcessingOrchestrator:
         logger.info("Stage 7: Metadata Storage started.")
         await self.progress_callback("Metadata Storage", 90)
         
+        if is_video_cancelled(video.id):
+            logger.info(f"Video {video.id} was cancelled before metadata commit. Rolling back.")
+            await self.db.rollback()
+            return
+
+        v_check = await self.db.execute(select(Video.id).filter(Video.id == video.id))
+        if not v_check.scalar():
+            logger.info(f"Video {video.id} no longer exists in DB before metadata commit. Rolling back.")
+            await self.db.rollback()
+            return
+
         await self.db.commit()
         
         vector_store = QdrantVectorStore()
@@ -263,7 +307,8 @@ class VideoProcessingOrchestrator:
                 self.db.add(camera)
                 await self.db.commit()
                 
-            await EventDetectionEngine.process_video_events(self.db, video.id, camera.id)
+            # Run General Incident/Event Detection (Zone Boundary & Suspicious Activity; Violence isolated to Violence module)
+            await EventDetectionEngine.process_video_events(self.db, video.id, camera.id, include_violence=False)
         except Exception as ee:
             logger.error(f"Failed to execute incident detection in pipeline: {str(ee)}")
 

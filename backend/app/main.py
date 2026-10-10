@@ -135,6 +135,18 @@ async def startup_event():
                 print("Database migration: added incident_id column to reports table.")
             except Exception:
                 pass
+            try:
+                await conn.execute(sqlalchemy.text("ALTER TABLE notifications ADD COLUMN dedup_key VARCHAR(255)"))
+                print("Database migration: added dedup_key column to notifications table.")
+            except Exception:
+                pass
+            try:
+                await conn.execute(sqlalchemy.text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_notifications_user_dedup ON notifications(user_id, dedup_key) WHERE dedup_key IS NOT NULL"
+                ))
+                print("Database migration: enforced UNIQUE index on notifications(user_id, dedup_key).")
+            except Exception:
+                pass
 
             # Migration for FAIL-04: Enforce UNIQUE constraint on reports.incident_id
             try:
@@ -244,6 +256,153 @@ async def startup_event():
                     print(f"Database index migration: created index {idx_name} on {table}({column}).")
                 except Exception:
                     pass
+
+            # Legacy student UUID normalization (32-char hex -> 36-char hyphenated canonical UUID)
+            try:
+                res = await conn.execute(sqlalchemy.text("SELECT id FROM students WHERE length(id) = 32"))
+                legacy_students = res.fetchall()
+                if legacy_students:
+                    print(f"Database UUID migration: found {len(legacy_students)} students with 32-char hex IDs. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_uuid
+                    ref_tables = [
+                        ("student_photos", "student_id"),
+                        ("student_face_sessions", "student_id"),
+                        ("student_face_embeddings", "student_id"),
+                        ("events", "student_id"),
+                        ("student_recognition_events", "student_id"),
+                        ("incident_persons", "student_id"),
+                        ("reports", "student_id"),
+                        ("tracks", "identified_student_id")
+                    ]
+                    for (old_id,) in legacy_students:
+                        canon_id = str(_norm_uuid.UUID(old_id))
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE students SET id = :new_id WHERE id = :old_id"),
+                            {"new_id": canon_id, "old_id": old_id}
+                        )
+                        for tbl, col in ref_tables:
+                            await conn.execute(
+                                sqlalchemy.text(f"UPDATE {tbl} SET {col} = :new_id WHERE {col} = :old_id"),
+                                {"new_id": canon_id, "old_id": old_id}
+                            )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database UUID migration: successfully normalized {len(legacy_students)} students to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database UUID migration notice: {e}")
+
+            # Legacy camera UUID normalization (32-char hex -> 36-char hyphenated canonical UUID)
+            try:
+                c_res = await conn.execute(sqlalchemy.text("SELECT id FROM cameras WHERE length(id) = 32"))
+                legacy_cameras = c_res.fetchall()
+                if legacy_cameras:
+                    print(f"Database Camera UUID migration: found {len(legacy_cameras)} cameras with 32-char hex IDs. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_cam_uuid
+                    camera_ref_tables = [
+                        ("videos", "camera_id"),
+                        ("camera_calibrations", "camera_id"),
+                        ("virtual_zones", "camera_id"),
+                        ("events", "camera_id"),
+                        ("student_recognition_events", "camera_id"),
+                        ("incidents", "camera_id"),
+                        ("detected_events", "camera_id")
+                    ]
+                    for (old_id,) in legacy_cameras:
+                        canon_id = str(_norm_cam_uuid.UUID(old_id))
+                        for tbl, col in camera_ref_tables:
+                            await conn.execute(
+                                sqlalchemy.text(f"UPDATE {tbl} SET {col} = :new_id WHERE {col} = :old_id"),
+                                {"new_id": canon_id, "old_id": old_id}
+                            )
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE cameras SET id = :new_id WHERE id = :old_id"),
+                            {"new_id": canon_id, "old_id": old_id}
+                        )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database Camera UUID migration: successfully normalized {len(legacy_cameras)} cameras to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database Camera UUID migration notice: {e}")
+
+            # Legacy video UUID and uploaded_by normalization (32-char hex -> 36-char hyphenated canonical UUID)
+            try:
+                v_res = await conn.execute(sqlalchemy.text("SELECT id FROM videos WHERE length(id) = 32"))
+                legacy_videos = v_res.fetchall()
+                if legacy_videos:
+                    print(f"Database Video UUID migration: found {len(legacy_videos)} videos with 32-char hex IDs. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_vid_uuid
+                    video_ref_tables = [
+                        ("tracks", "video_id"),
+                        ("person_reids", "video_id"),
+                        ("events", "video_id"),
+                        ("student_recognition_events", "video_id"),
+                        ("detected_events", "video_id")
+                    ]
+                    for (old_id,) in legacy_videos:
+                        canon_id = str(_norm_vid_uuid.UUID(old_id))
+                        for tbl, col in video_ref_tables:
+                            await conn.execute(
+                                sqlalchemy.text(f"UPDATE {tbl} SET {col} = :new_id WHERE {col} = :old_id"),
+                                {"new_id": canon_id, "old_id": old_id}
+                            )
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE videos SET id = :new_id WHERE id = :old_id"),
+                            {"new_id": canon_id, "old_id": old_id}
+                        )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database Video UUID migration: successfully normalized {len(legacy_videos)} videos to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database Video UUID migration notice: {e}")
+
+            try:
+                u_res = await conn.execute(sqlalchemy.text("SELECT uploaded_by FROM videos WHERE length(uploaded_by) = 32 GROUP BY uploaded_by"))
+                legacy_uploaders = u_res.fetchall()
+                if legacy_uploaders:
+                    print(f"Database Video uploaded_by migration: found {len(legacy_uploaders)} distinct 32-char hex uploaders. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_u_uuid
+                    for (old_u_id,) in legacy_uploaders:
+                        canon_u_id = str(_norm_u_uuid.UUID(old_u_id))
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE videos SET uploaded_by = :new_id WHERE uploaded_by = :old_id"),
+                            {"new_id": canon_u_id, "old_id": old_u_id}
+                        )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database Video uploaded_by migration: successfully normalized {len(legacy_uploaders)} uploaders to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database Video uploaded_by migration notice: {e}")
+
+            # Legacy incident UUID normalization (32-char hex -> 36-char hyphenated canonical UUID)
+            try:
+                inc_res = await conn.execute(sqlalchemy.text("SELECT id FROM incidents WHERE length(id) = 32"))
+                legacy_incidents = inc_res.fetchall()
+                if legacy_incidents:
+                    print(f"Database Incident UUID migration: found {len(legacy_incidents)} incidents with 32-char hex IDs. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_inc_uuid
+                    inc_ref_tables = [
+                        ("incident_persons", "incident_id"),
+                        ("evidences", "incident_id"),
+                        ("detected_events", "incident_id"),
+                        ("reports", "incident_id")
+                    ]
+                    for (old_id,) in legacy_incidents:
+                        canon_id = str(_norm_inc_uuid.UUID(old_id))
+                        for tbl, col in inc_ref_tables:
+                            await conn.execute(
+                                sqlalchemy.text(f"UPDATE {tbl} SET {col} = :new_id WHERE {col} = :old_id"),
+                                {"new_id": canon_id, "old_id": old_id}
+                            )
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE incidents SET id = :new_id WHERE id = :old_id"),
+                            {"new_id": canon_id, "old_id": old_id}
+                        )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database Incident UUID migration: successfully normalized {len(legacy_incidents)} incidents to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database Incident UUID migration notice: {e}")
+
         print("SQLite fallback tables initialized successfully.")
 
         # Sync database face embeddings to Qdrant

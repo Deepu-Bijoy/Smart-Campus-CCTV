@@ -23,7 +23,11 @@ class QdrantVectorStore:
                 # we specify path to store SQLite/Qdrant databases on disk
                 db_path = os.path.join(settings.STORAGE_DIR, "qdrant_db")
                 os.makedirs(db_path, exist_ok=True)
-                QdrantVectorStore._in_memory_client = QdrantClient(path=db_path)
+                try:
+                    QdrantVectorStore._in_memory_client = QdrantClient(path=db_path)
+                except Exception as q_lock_err:
+                    logger.warning(f"Qdrant storage folder locked by another process ({q_lock_err}), falling back to in-memory client.")
+                    QdrantVectorStore._in_memory_client = QdrantClient(":memory:")
             self.client = QdrantVectorStore._in_memory_client
             logger.info("Initializing shared local persistent QdrantClient.")
         else:

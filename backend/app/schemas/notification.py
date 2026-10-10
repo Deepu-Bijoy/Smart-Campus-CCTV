@@ -10,6 +10,7 @@ class NotificationResponse(BaseModel):
     severity: str
     is_read: bool
     created_at: datetime
+    dedup_key: Optional[str] = None
 
     class Config:
         from_attributes = True

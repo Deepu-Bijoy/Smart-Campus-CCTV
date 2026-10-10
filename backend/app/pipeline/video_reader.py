@@ -9,6 +9,21 @@ class VideoReader:
         self.file_path = file_path
         self.target_fps = target_fps
 
+    @property
+    def estimated_target_frames(self) -> int:
+        """Estimate the count of target frames that will be extracted."""
+        try:
+            cap = cv2.VideoCapture(self.file_path)
+            if not cap.isOpened():
+                return 0
+            original_fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            cap.release()
+            frame_interval = max(1, round(original_fps / self.target_fps))
+            return max(1, total_frames // frame_interval)
+        except Exception:
+            return 0
+
     def read_frames(
         self,
         start_time: Optional[float] = None,

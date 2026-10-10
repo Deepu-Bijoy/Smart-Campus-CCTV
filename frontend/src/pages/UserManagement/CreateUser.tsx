@@ -65,18 +65,18 @@ export const CreateUser: React.FC = () => {
   if (!isAdmin) {
     return (
       <div className="max-w-xl mx-auto py-12 px-4">
-        <div className="bg-red-950/30 border border-red-800/50 rounded-2xl p-8 text-center space-y-4">
-          <div className="mx-auto w-12 h-12 rounded-full bg-red-500/10 border border-red-500/30 flex items-center justify-center text-red-400">
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-8 text-center space-y-4 shadow-sm">
+          <div className="mx-auto w-12 h-12 rounded-full bg-red-100 border border-red-200 flex items-center justify-center text-red-600">
             <ShieldAlert className="h-6 w-6" />
           </div>
-          <h2 className="text-xl font-bold text-slate-100">Access Restricted</h2>
-          <p className="text-sm text-slate-400">
+          <h2 className="text-xl font-bold text-slate-900">Access Restricted</h2>
+          <p className="text-sm text-slate-600">
             You do not have permission to access the User Registration portal. Administrator privileges are required.
           </p>
           <button
             type="button"
             onClick={() => navigate('/')}
-            className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold transition"
+            className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 rounded-xl text-xs font-semibold transition"
           >
             Return to Dashboard
           </button>
@@ -166,8 +166,6 @@ export const CreateUser: React.FC = () => {
     setIsSubmitting(true);
 
     try {
-      // Backend expects UserCreate schema:
-      // { email: EmailStr, password: str, full_name?: str, role?: str, is_active?: bool }
       const payload = {
         email: form.email.trim().toLowerCase(),
         password: form.password,
@@ -225,16 +223,16 @@ export const CreateUser: React.FC = () => {
           <button
             type="button"
             onClick={() => navigate('/')}
-            className="flex items-center space-x-1.5 text-xs text-slate-400 hover:text-slate-200 transition mb-2"
+            className="flex items-center space-x-1.5 text-xs text-slate-500 hover:text-slate-800 transition mb-2"
           >
             <ArrowLeft className="h-3.5 w-3.5" />
             <span>Back to Dashboard</span>
           </button>
-          <h1 className="text-2xl font-bold text-slate-100 tracking-tight flex items-center space-x-2">
-            <UserPlus className="h-6 w-6 text-blue-500" />
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight flex items-center space-x-2">
+            <UserPlus className="h-6 w-6 text-blue-600" />
             <span>Create New User</span>
           </h1>
-          <p className="text-slate-400 text-sm mt-1">
+          <p className="text-slate-500 text-sm mt-1">
             Add a new authorized user to the Smart Campus Surveillance System.
           </p>
         </div>
@@ -242,15 +240,15 @@ export const CreateUser: React.FC = () => {
 
       {/* Success Banner */}
       {successInfo && (
-        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-2xl p-6 shadow-lg space-y-3">
+        <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 shadow-sm space-y-3">
           <div className="flex items-start space-x-3">
-            <CheckCircle2 className="h-5 w-5 text-emerald-400 flex-shrink-0 mt-0.5" />
+            <CheckCircle2 className="h-5 w-5 text-emerald-600 flex-shrink-0 mt-0.5" />
             <div className="flex-1">
-              <h3 className="text-emerald-400 font-semibold text-sm">User created successfully.</h3>
-              <p className="text-slate-300 text-xs mt-1">
-                Account for <span className="font-semibold text-white">{successInfo.fullName || successInfo.email}</span> (
-                <span className="font-mono text-emerald-300">{successInfo.email}</span>) with role{' '}
-                <span className="font-semibold uppercase tracking-wider text-xs px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+              <h3 className="text-emerald-800 font-semibold text-sm">User created successfully.</h3>
+              <p className="text-slate-700 text-xs mt-1">
+                Account for <span className="font-semibold text-slate-900">{successInfo.fullName || successInfo.email}</span> (
+                <span className="font-mono text-emerald-700">{successInfo.email}</span>) with role{' '}
+                <span className="font-semibold uppercase tracking-wider text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300">
                   {successInfo.role}
                 </span>{' '}
                 is active and ready for login.
@@ -259,7 +257,7 @@ export const CreateUser: React.FC = () => {
             <button
               type="button"
               onClick={() => setSuccessInfo(null)}
-              className="text-xs text-slate-400 hover:text-slate-200 underline"
+              className="text-xs text-slate-500 hover:text-slate-800 underline"
             >
               Dismiss
             </button>
@@ -269,7 +267,7 @@ export const CreateUser: React.FC = () => {
 
       {/* Error Banner */}
       {apiError && (
-        <div className="bg-red-500/10 border border-red-500/30 rounded-2xl p-4 flex items-start space-x-3 text-red-400 text-sm">
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start space-x-3 text-red-600 text-sm">
           <AlertCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
           <div className="flex-1">
             <span className="font-medium">{apiError}</span>
@@ -278,16 +276,16 @@ export const CreateUser: React.FC = () => {
       )}
 
       {/* Main Registration Card */}
-      <div className="bg-dark-card border border-dark-border rounded-2xl p-8 shadow-xl space-y-6">
+      <div className="bg-white border border-slate-200 rounded-2xl p-8 shadow-sm space-y-6">
         <form onSubmit={handleSubmit} className="space-y-6" noValidate>
           {/* Full Name */}
           <div className="space-y-1.5">
-            <label htmlFor="fullName" className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+            <label htmlFor="fullName" className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center justify-between">
               <span>Full Name</span>
-              <span className="text-[10px] text-slate-500 lowercase">required</span>
+              <span className="text-[10px] text-slate-400 lowercase">required</span>
             </label>
             <div className="relative flex items-center">
-              <User className="absolute left-3.5 h-4 w-4 text-slate-500" />
+              <User className="absolute left-3.5 h-4 w-4 text-slate-400" />
               <input
                 id="fullName"
                 type="text"
@@ -296,15 +294,15 @@ export const CreateUser: React.FC = () => {
                 placeholder="e.g. John Doe"
                 maxLength={100}
                 disabled={isSubmitting}
-                className={`w-full pl-10 pr-4 py-2.5 bg-slate-900 border rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none transition text-sm ${
+                className={`w-full pl-10 pr-4 py-2.5 bg-white border rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm ${
                   errors.fullName
-                    ? 'border-red-500 focus:border-red-400'
-                    : 'border-dark-border focus:border-blue-500'
+                    ? 'border-red-400 focus:border-red-500'
+                    : 'border-slate-300'
                 }`}
               />
             </div>
             {errors.fullName && (
-              <p className="text-xs text-red-400 font-medium flex items-center space-x-1 mt-1">
+              <p className="text-xs text-red-600 font-medium flex items-center space-x-1 mt-1">
                 <span>{errors.fullName}</span>
               </p>
             )}
@@ -312,12 +310,12 @@ export const CreateUser: React.FC = () => {
 
           {/* Email Address */}
           <div className="space-y-1.5">
-            <label htmlFor="email" className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+            <label htmlFor="email" className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center justify-between">
               <span>Email Address</span>
-              <span className="text-[10px] text-slate-500 lowercase">required</span>
+              <span className="text-[10px] text-slate-400 lowercase">required</span>
             </label>
             <div className="relative flex items-center">
-              <Mail className="absolute left-3.5 h-4 w-4 text-slate-500" />
+              <Mail className="absolute left-3.5 h-4 w-4 text-slate-400" />
               <input
                 id="email"
                 type="email"
@@ -325,15 +323,15 @@ export const CreateUser: React.FC = () => {
                 onChange={(e) => handleInputChange('email', e.target.value)}
                 placeholder="operator@campus.edu"
                 disabled={isSubmitting}
-                className={`w-full pl-10 pr-4 py-2.5 bg-slate-900 border rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none transition text-sm ${
+                className={`w-full pl-10 pr-4 py-2.5 bg-white border rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm ${
                   errors.email
-                    ? 'border-red-500 focus:border-red-400'
-                    : 'border-dark-border focus:border-blue-500'
+                    ? 'border-red-400 focus:border-red-500'
+                    : 'border-slate-300'
                 }`}
               />
             </div>
             {errors.email && (
-              <p className="text-xs text-red-400 font-medium flex items-center space-x-1 mt-1">
+              <p className="text-xs text-red-600 font-medium flex items-center space-x-1 mt-1">
                 <span>{errors.email}</span>
               </p>
             )}
@@ -341,18 +339,18 @@ export const CreateUser: React.FC = () => {
 
           {/* Role Dropdown */}
           <div className="space-y-1.5">
-            <label htmlFor="role" className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+            <label htmlFor="role" className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center justify-between">
               <span>Role</span>
-              <span className="text-[10px] text-slate-500 lowercase">authorized role only</span>
+              <span className="text-[10px] text-slate-400 lowercase">authorized role only</span>
             </label>
             <div className="relative flex items-center">
-              <Shield className="absolute left-3.5 h-4 w-4 text-slate-500 pointer-events-none" />
+              <Shield className="absolute left-3.5 h-4 w-4 text-slate-400 pointer-events-none" />
               <select
                 id="role"
                 value={form.role}
                 onChange={(e) => handleInputChange('role', e.target.value as 'operator' | 'user')}
                 disabled={isSubmitting}
-                className="w-full pl-10 pr-4 py-2.5 bg-slate-900 border border-dark-border rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 transition text-sm appearance-none cursor-pointer"
+                className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-300 rounded-xl text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm appearance-none cursor-pointer"
               >
                 <option value="operator">Operator (CCTV Surveillance & Monitoring)</option>
                 <option value="user">User (Standard Campus Staff / Read-Only Access)</option>
@@ -362,7 +360,7 @@ export const CreateUser: React.FC = () => {
               Administrator privileges remain controlled and cannot be assigned through standard registration.
             </p>
             {errors.role && (
-              <p className="text-xs text-red-400 font-medium flex items-center space-x-1 mt-1">
+              <p className="text-xs text-red-600 font-medium flex items-center space-x-1 mt-1">
                 <span>{errors.role}</span>
               </p>
             )}
@@ -372,12 +370,12 @@ export const CreateUser: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Password */}
             <div className="space-y-1.5">
-              <label htmlFor="password" className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+              <label htmlFor="password" className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center justify-between">
                 <span>Password</span>
-                <span className="text-[10px] text-slate-500 lowercase">min 8 characters</span>
+                <span className="text-[10px] text-slate-400 lowercase">min 8 characters</span>
               </label>
               <div className="relative flex items-center">
-                <Lock className="absolute left-3.5 h-4 w-4 text-slate-500" />
+                <Lock className="absolute left-3.5 h-4 w-4 text-slate-400" />
                 <input
                   id="password"
                   type={showPassword ? 'text' : 'password'}
@@ -385,23 +383,23 @@ export const CreateUser: React.FC = () => {
                   onChange={(e) => handleInputChange('password', e.target.value)}
                   placeholder="••••••••"
                   disabled={isSubmitting}
-                  className={`w-full pl-10 pr-10 py-2.5 bg-slate-900 border rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none transition text-sm ${
+                  className={`w-full pl-10 pr-10 py-2.5 bg-white border rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm ${
                     errors.password
-                      ? 'border-red-500 focus:border-red-400'
-                      : 'border-dark-border focus:border-blue-500'
+                      ? 'border-red-400 focus:border-red-500'
+                      : 'border-slate-300'
                   }`}
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3 text-slate-500 hover:text-slate-300 focus:outline-none"
+                  className="absolute right-3 text-slate-400 hover:text-slate-600 focus:outline-none"
                   aria-label={showPassword ? 'Hide password' : 'Show password'}
                 >
                   {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               {errors.password && (
-                <p className="text-xs text-red-400 font-medium flex items-center space-x-1 mt-1">
+                <p className="text-xs text-red-600 font-medium flex items-center space-x-1 mt-1">
                   <span>{errors.password}</span>
                 </p>
               )}
@@ -409,12 +407,12 @@ export const CreateUser: React.FC = () => {
 
             {/* Confirm Password */}
             <div className="space-y-1.5">
-              <label htmlFor="confirmPassword" className="text-xs font-semibold text-slate-300 uppercase tracking-wider flex items-center justify-between">
+              <label htmlFor="confirmPassword" className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center justify-between">
                 <span>Confirm Password</span>
-                <span className="text-[10px] text-slate-500 lowercase">match password</span>
+                <span className="text-[10px] text-slate-400 lowercase">match password</span>
               </label>
               <div className="relative flex items-center">
-                <Lock className="absolute left-3.5 h-4 w-4 text-slate-500" />
+                <Lock className="absolute left-3.5 h-4 w-4 text-slate-400" />
                 <input
                   id="confirmPassword"
                   type={showConfirmPassword ? 'text' : 'password'}
@@ -422,23 +420,23 @@ export const CreateUser: React.FC = () => {
                   onChange={(e) => handleInputChange('confirmPassword', e.target.value)}
                   placeholder="••••••••"
                   disabled={isSubmitting}
-                  className={`w-full pl-10 pr-10 py-2.5 bg-slate-900 border rounded-xl text-slate-200 placeholder-slate-500 focus:outline-none transition text-sm ${
+                  className={`w-full pl-10 pr-10 py-2.5 bg-white border rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition text-sm ${
                     errors.confirmPassword
-                      ? 'border-red-500 focus:border-red-400'
-                      : 'border-dark-border focus:border-blue-500'
+                      ? 'border-red-400 focus:border-red-500'
+                      : 'border-slate-300'
                   }`}
                 />
                 <button
                   type="button"
                   onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                  className="absolute right-3 text-slate-500 hover:text-slate-300 focus:outline-none"
+                  className="absolute right-3 text-slate-400 hover:text-slate-600 focus:outline-none"
                   aria-label={showConfirmPassword ? 'Hide confirm password' : 'Show confirm password'}
                 >
                   {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               {errors.confirmPassword && (
-                <p className="text-xs text-red-400 font-medium flex items-center space-x-1 mt-1">
+                <p className="text-xs text-red-600 font-medium flex items-center space-x-1 mt-1">
                   <span>{errors.confirmPassword}</span>
                 </p>
               )}
@@ -446,19 +444,19 @@ export const CreateUser: React.FC = () => {
           </div>
 
           {/* Form Actions */}
-          <div className="pt-4 border-t border-dark-border/60 flex items-center justify-end space-x-3">
+          <div className="pt-4 border-t border-slate-100 flex items-center justify-end space-x-3">
             <button
               type="button"
               onClick={resetForm}
               disabled={isSubmitting}
-              className="px-5 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded-xl text-xs font-semibold transition"
+              className="px-5 py-2.5 bg-slate-100 hover:bg-slate-200 border border-slate-200 disabled:opacity-50 text-slate-700 rounded-xl text-xs font-semibold transition"
             >
               Reset Form
             </button>
             <button
               type="submit"
               disabled={isSubmitting}
-              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl font-semibold text-xs shadow-lg shadow-blue-500/20 transition flex items-center space-x-2"
+              className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-100 disabled:text-slate-400 text-white rounded-xl font-semibold text-xs shadow-sm transition flex items-center space-x-2"
             >
               {isSubmitting ? (
                 <>

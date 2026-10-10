@@ -16,26 +16,25 @@ export const Sidebar: React.FC = () => {
     { name: 'Forensic Reports', path: '/reports', icon: FileText },
     { name: 'Upload Feed', path: '/upload', icon: UploadCloud },
     { name: 'Student Directory', path: '/students', icon: Users },
-    { name: 'Bulk Enrollment', path: '/students/import', icon: UploadCloud },
     { name: 'Investigation Search', path: '/search', icon: Search },
     { name: 'Settings', path: '/settings', icon: Settings },
   ];
 
   return (
-    <aside className="w-64 bg-dark-card border-r border-dark-border min-h-screen flex flex-col">
-      <div className="h-16 flex items-center justify-center border-b border-dark-border px-6">
-        <h1 className="text-blue-500 font-bold text-lg tracking-wide uppercase">Smart Campus CCTV</h1>
+    <aside className="w-64 bg-white border-r border-slate-200 min-h-screen flex flex-col">
+      <div className="h-16 flex items-center justify-center border-b border-slate-200 px-6">
+        <h1 className="text-blue-600 font-bold text-lg tracking-wide uppercase">Smart Campus CCTV</h1>
       </div>
-      <nav className="flex-1 py-6 px-4 space-y-2">
+      <nav className="flex-1 py-6 px-4 space-y-1.5">
         {menuItems.map((item) => (
           <NavLink
             key={item.path}
             to={item.path}
             className={({ isActive }) =>
-              `flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+              `flex items-center space-x-3 px-4 py-3 rounded-lg transition text-sm ${
                 isActive
-                  ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-500/20'
-                  : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                  ? 'bg-blue-50 text-blue-600 font-semibold'
+                  : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
               }`
             }
           >
@@ -45,17 +44,17 @@ export const Sidebar: React.FC = () => {
         ))}
 
         {isAdmin && (
-          <div className="pt-3 mt-3 border-t border-dark-border/60">
-            <div className="px-4 pb-2 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">
+          <div className="pt-3 mt-3 border-t border-slate-200">
+            <div className="px-4 pb-2 text-[11px] font-semibold tracking-wider text-slate-400 uppercase">
               User Management
             </div>
             <NavLink
               to="/users/create"
               className={({ isActive }) =>
-                `flex items-center space-x-3 px-4 py-3 rounded-lg transition ${
+                `flex items-center space-x-3 px-4 py-3 rounded-lg transition text-sm ${
                   isActive
-                    ? 'bg-blue-600 text-white font-medium shadow-md shadow-blue-500/20'
-                    : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                    ? 'bg-blue-50 text-blue-600 font-semibold'
+                    : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 font-medium'
                 }`
               }
             >

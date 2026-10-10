@@ -109,7 +109,10 @@ async def upload_video(
     logger.info(f"Video {video.id} saved in database. Dispatching processing task to Celery...")
     
     try:
-        process_video.delay(str(video.id))
+        task_res = process_video.delay(str(video.id))
+        if hasattr(task_res, "id") and task_res.id:
+            from app.tasks.video_tasks import register_video_task
+            register_video_task(str(video.id), task_res.id)
         logger.info(f"Task successfully dispatched to Celery for Video: {video.id}")
     except Exception as e:
         logger.error(f"Failed to dispatch Celery task: {str(e)}")
@@ -127,9 +130,22 @@ async def list_videos(
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
-    result = await db.execute(
-        select(Video).filter(Video.uploaded_by == current_user.id).order_by(Video.created_at.desc())
-    )
+    role = getattr(current_user, "role", "").lower()
+    is_staff = role in ["admin", "operator"]
+    if is_staff:
+        result = await db.execute(
+            select(Video).order_by(Video.created_at.desc())
+        )
+    else:
+        uid_str = str(current_user.id)
+        uid_hex = current_user.id.hex if hasattr(current_user.id, "hex") else uid_str.replace("-", "")
+        result = await db.execute(
+            select(Video).filter(
+                (Video.uploaded_by == current_user.id) |
+                (Video.uploaded_by == uid_str) |
+                (Video.uploaded_by == uid_hex)
+            ).order_by(Video.created_at.desc())
+        )
     return result.scalars().all()
 
 @router.get("/{video_id}", response_model=VideoResponse)
@@ -138,15 +154,28 @@ async def get_video(
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
+    vid_str = str(video_id)
+    vid_hex = video_id.hex if hasattr(video_id, "hex") else vid_str.replace("-", "")
     result = await db.execute(
-        select(Video).filter(Video.id == video_id, Video.uploaded_by == current_user.id)
+        select(Video).filter(
+            (Video.id == video_id) | (Video.id == vid_str) | (Video.id == vid_hex)
+        )
     )
     video = result.scalars().first()
     if not video:
-        logger.warning(f"Video {video_id} not found or access denied for user {current_user.id}")
+        logger.warning(f"Video {video_id} not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Video not found"
+        )
+    role = getattr(current_user, "role", "").lower()
+    is_staff = role in ["admin", "operator"]
+    uid_hex = current_user.id.hex if hasattr(current_user.id, "hex") else str(current_user.id).replace("-", "")
+    video_uploader_hex = str(video.uploaded_by).replace("-", "")
+    if not is_staff and video_uploader_hex != uid_hex:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
         )
     return video
 
@@ -156,8 +185,12 @@ async def get_video_status(
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
+    vid_str = str(video_id)
+    vid_hex = video_id.hex if hasattr(video_id, "hex") else vid_str.replace("-", "")
     result = await db.execute(
-        select(Video).filter(Video.id == video_id, Video.uploaded_by == current_user.id)
+        select(Video).filter(
+            (Video.id == video_id) | (Video.id == vid_str) | (Video.id == vid_hex)
+        )
     )
     video = result.scalars().first()
     if not video:
@@ -178,32 +211,51 @@ async def delete_video(
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> None:
-    from app.models.track import Track, PersonReid
+    import shutil
+    from app.models.track import Track, PersonReid, Detection
     from app.models.recognition import StudentRecognitionEvent
-    from app.models.incident import Incident, DetectedEvent, Evidence
+    from app.models.incident import Incident, DetectedEvent, Evidence, IncidentPerson
+    from app.models.event import Event, EventTrack
+    from app.tasks.video_tasks import cancel_video_processing
     from app.services.vector_store import QdrantVectorStore
     from qdrant_client.http import models as qdrant_models
-    from sqlalchemy import func
+    from sqlalchemy import func, text
     
-    result = await db.execute(
-        select(Video).filter(Video.id == video_id, Video.uploaded_by == current_user.id)
+    vid_str = str(video_id)
+    vid_hex = video_id.hex if hasattr(video_id, "hex") else vid_str.replace("-", "")
+    # Check if video exists at all (differentiating 404 vs 403)
+    v_res = await db.execute(
+        select(Video).filter(
+            (Video.id == video_id) | (Video.id == vid_str) | (Video.id == vid_hex)
+        )
     )
-    video = result.scalars().first()
+    video = v_res.scalars().first()
     if not video:
-        logger.warning(f"Video {video_id} not found or access denied for deletion by user {current_user.id}")
+        logger.warning(f"Video {video_id} not found for deletion")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Video not found"
         )
         
-    if video.status == "processing":
+    # Check authorization (owner or staff: admin/operator)
+    role = getattr(current_user, "role", "").lower()
+    is_staff = role in ["admin", "operator"]
+    uid_hex = current_user.id.hex if hasattr(current_user.id, "hex") else str(current_user.id).replace("-", "")
+    video_uploader_hex = str(video.uploaded_by).replace("-", "")
+    if video_uploader_hex != uid_hex and not is_staff:
+        logger.warning(f"User {current_user.id} unauthorized to delete video {video_id} uploaded by {video.uploaded_by}")
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot delete video while it is currently processing."
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to delete this surveillance feed."
         )
-        
-    # Transactional atomic deletion
+
+    # Immediately request cancellation of any active/queued background workers or Celery tasks
+    cancel_video_processing(video_id)
+            
+    # Transactional atomic deletion in safe dependency order
     try:
+        vid_str = str(video_id)
+        
         # 1. Fetch counts before delete for logging
         t_count_res = await db.execute(
             select(func.count(Track.id)).filter(Track.video_id == video_id)
@@ -223,7 +275,7 @@ async def delete_video(
                     must=[
                         qdrant_models.FieldCondition(
                             key="video_id",
-                            match=qdrant_models.MatchValue(value=str(video_id))
+                            match=qdrant_models.MatchValue(value=vid_str)
                         )
                     ]
                 ),
@@ -232,75 +284,130 @@ async def delete_video(
             deleted_vectors_count = q_count.count
         except Exception:
             deleted_vectors_count = 0
-            
-        # 2. Get and clean related incidents & evidence files
+
+        # 2. Collect physical files to delete after database commit
+        files_to_remove = set()
+        if video.file_path and os.path.exists(video.file_path):
+            files_to_remove.add(video.file_path)
+
+        # Collect track keyframes and PersonReid crops
+        tracks_res = await db.execute(select(Track.key_frame_path).filter(Track.video_id == video_id))
+        for (kf,) in tracks_res.fetchall():
+            if kf and os.path.exists(kf):
+                files_to_remove.add(kf)
+
+        reids_res = await db.execute(select(PersonReid.crop_path).filter(PersonReid.video_id == video_id))
+        for (cp,) in reids_res.fetchall():
+            if cp and os.path.exists(cp):
+                files_to_remove.add(cp)
+
+        # 3. Handle related incidents:
+        # Only delete an incident (and its evidence) if no other video references it!
         det_events_res = await db.execute(
-            select(DetectedEvent).filter(DetectedEvent.video_id == video_id)
+            select(DetectedEvent.incident_id).filter(
+                DetectedEvent.video_id == video_id,
+                DetectedEvent.incident_id.isnot(None)
+            ).distinct()
         )
-        det_events = det_events_res.scalars().all()
-        incident_ids = {de.incident_id for de in det_events if de.incident_id is not None}
-        
-        for inc_id in incident_ids:
-            inc_res = await db.execute(
-                select(Incident).filter(Incident.id == inc_id)
-            )
-            incident = inc_res.scalars().first()
-            if incident:
-                # Delete evidence physical files
-                for ev in incident.evidences:
-                    if os.path.exists(ev.file_path):
-                        try:
-                            os.remove(ev.file_path)
-                        except Exception as fe:
-                            logger.error(f"Failed to delete evidence file {ev.file_path}: {str(fe)}")
-                await db.delete(incident)
-                
-        # 3. Clean up physical crop files from Track and PersonReid
-        reids_res = await db.execute(
-            select(PersonReid).filter(PersonReid.video_id == video_id)
+        cand_incident_ids = [r[0] for r in det_events_res.fetchall()]
+        incidents_to_delete = []
+        for inc_id in cand_incident_ids:
+            other_refs = (await db.execute(
+                select(func.count(DetectedEvent.id)).filter(
+                    DetectedEvent.incident_id == inc_id,
+                    DetectedEvent.video_id != video_id
+                )
+            )).scalar() or 0
+            if other_refs == 0:
+                incidents_to_delete.append(inc_id)
+                ev_res = await db.execute(
+                    select(Evidence.file_path).filter(Evidence.incident_id == inc_id)
+                )
+                for (ef,) in ev_res.fetchall():
+                    if ef and os.path.exists(ef):
+                        files_to_remove.add(ef)
+
+        vid_hex = video.id.hex if hasattr(video.id, "hex") else vid_str.replace("-", "")
+        # A. event_tracks for tracks of this video or events of this video
+        await db.execute(
+            text("""DELETE FROM event_tracks 
+                    WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid OR video_id = :vid_hex)
+                       OR event_id IN (SELECT id FROM events WHERE video_id = :vid OR video_id = :vid_hex)""").bindparams(vid=vid_str, vid_hex=vid_hex)
         )
-        reids = reids_res.scalars().all()
-        for reid in reids:
-            if os.path.exists(reid.crop_path):
-                try:
-                    os.remove(reid.crop_path)
-                except Exception:
-                    pass
-                    
-        tracks_res = await db.execute(
-            select(Track).filter(Track.video_id == video_id)
+        # B. events for this video
+        await db.execute(
+            text("DELETE FROM events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
         )
-        tracks = tracks_res.scalars().all()
-        for track in tracks:
-            if track.key_frame_path and os.path.exists(track.key_frame_path):
-                try:
-                    os.remove(track.key_frame_path)
-                except Exception:
-                    pass
-                    
-        # 4. Delete CLIP embeddings from Qdrant
+        # C. student_recognition_events for this video
+        await db.execute(
+            text("DELETE FROM student_recognition_events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+        )
+        # D. person_reids for this video
+        await db.execute(
+            text("DELETE FROM person_reids WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+        )
+        # E. detections for tracks of this video
+        await db.execute(
+            text("DELETE FROM detections WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid OR video_id = :vid_hex)").bindparams(vid=vid_str, vid_hex=vid_hex)
+        )
+        # F. tracks for this video
+        await db.execute(
+            text("DELETE FROM tracks WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+        )
+        # G. detected_events for this video
+        await db.execute(
+            text("DELETE FROM detected_events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+        )
+        # H. Orphaned incidents
+        for inc_id in incidents_to_delete:
+            i_str = str(inc_id)
+            await db.execute(text("UPDATE reports SET incident_id = NULL WHERE incident_id = :iid").bindparams(iid=i_str))
+            await db.execute(text("DELETE FROM evidences WHERE incident_id = :iid").bindparams(iid=i_str))
+            await db.execute(text("DELETE FROM incident_persons WHERE incident_id = :iid").bindparams(iid=i_str))
+            await db.execute(text("DELETE FROM incidents WHERE id = :iid").bindparams(iid=i_str))
+
+        # I. Delete video record itself
+        await db.execute(text("DELETE FROM videos WHERE id = :vid OR id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex))
+
+        # 5. Delete vectors from Qdrant
         try:
             qdrant_store.delete_vectors_by_video_id(video_id)
         except Exception as qe:
             logger.error(f"Failed to clean up Qdrant CCTV vectors for video {video_id}: {str(qe)}")
-            
-        # 5. Delete physical video file
-        if os.path.exists(video.file_path):
-            os.remove(video.file_path)
-            
-        # 6. Delete video record (cascades to Event, DetectedEvent, Track, PersonReid, StudentRecognitionEvent)
-        await db.delete(video)
+
+        # Commit database transaction
         await db.commit()
-        
-        # Log exact format requested
+        db.expire_all()
+
+        # 6. Delete physical files and artifact directories from disk safely
+        for fp in files_to_remove:
+            try:
+                if os.path.exists(fp):
+                    os.remove(fp)
+            except Exception as fe:
+                logger.error(f"Failed to remove physical file {fp}: {str(fe)}")
+
+        # Clean up video-specific crop directory if present
+        v_crop_dir = os.path.join(settings.STORAGE_DIR, "crops", vid_str)
+        if os.path.exists(v_crop_dir):
+            shutil.rmtree(v_crop_dir, ignore_errors=True)
+
+        # Clean up video-specific frames directory if present
+        v_frame_dir = os.path.join(settings.STORAGE_DIR, "frames", vid_str)
+        if os.path.exists(v_frame_dir):
+            shutil.rmtree(v_frame_dir, ignore_errors=True)
+
         logger.info(f"Deleted video: video_id={video_id} Removed: Tracks: {tracks_count} Events: {events_count} Qdrant vectors: {deleted_vectors_count}")
-        
+
+    except HTTPException:
+        await db.rollback()
+        raise
     except Exception as e:
         await db.rollback()
-        logger.error(f"Failed to delete video {video_id}: {str(e)}")
+        logger.exception(f"Failed to delete video {video_id}: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete video: {str(e)}"
+            detail="Unable to delete this video because related analysis records could not be removed. No changes were committed."
         )
-        
+
     return

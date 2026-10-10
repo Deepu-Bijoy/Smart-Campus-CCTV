@@ -1,26 +1,21 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
-  Swords, 
-  UploadCloud, 
+  Upload, 
   CheckCircle2, 
   AlertTriangle, 
   Image as ImageIcon,
   Film,
-  Video as VideoIcon, 
-  ShieldAlert, 
-  Activity, 
-  Play, 
   Loader2, 
   X, 
-  FileVideo, 
-  FileText,
   RotateCcw,
-  Target,
   Users,
-  ArrowRight,
-  Maximize2
+  ChevronLeft,
+  ChevronRight,
+  Play,
+  Activity,
+  ArrowUpRight
 } from 'lucide-react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { AuthenticatedImage } from '../components/AuthenticatedImage';
 
@@ -90,6 +85,7 @@ export interface ViolenceSegment {
   explanation: string;
   evidence_image?: string | null;
   evidence_video?: string | null;
+  persons_count?: number;
   tracks?: SegmentTrackInfo[];
   students?: InvolvedStudentCard[];
 }
@@ -119,39 +115,28 @@ export const ViolenceDetection: React.FC = () => {
   const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number } | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
-  // Upload states
+  // Upload state
   const [uploadedVideo, setUploadedVideo] = useState<UploadedVideoInfo | null>(null);
   const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
   const [uploadProgress, setUploadProgress] = useState<number>(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
-  // Analysis states: 'idle' | 'loading' | 'error' | 'success_violence' | 'success_normal'
+  // Analysis state
   const [analysisState, setAnalysisState] = useState<'idle' | 'loading' | 'error' | 'success_violence' | 'success_normal'>('idle');
   const [analysisResult, setAnalysisResult] = useState<ViolenceAnalysisResponse | null>(null);
-  const [activeSegmentIndex, setActiveSegmentIndex] = useState<number>(0);
-  const [currentStageText, setCurrentStageText] = useState<string>('Validating CCTV footage codec and integrity...');
-  const [loadingStep, setLoadingStep] = useState<number>(0);
+  const [currentStageText, setCurrentStageText] = useState<string>('Initializing pipeline...');
+  const [analysisProgress, setAnalysisProgress] = useState<number>(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [selectedEvidenceFrame, setSelectedEvidenceFrame] = useState<string | null>(null);
-  const [isGeneratingReport, setIsGeneratingReport] = useState<boolean>(false);
 
-  const navigate = useNavigate();
+  // Evidence modal state
+  const [selectedSegmentModalIndex, setSelectedSegmentModalIndex] = useState<number | null>(null);
+  const [evidenceMediaType, setEvidenceMediaType] = useState<'clip' | 'frame'>('clip');
+
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
+  const mainVideoPlayerRef = useRef<HTMLVideoElement | null>(null);
   const pollIntervalRef = useRef<any>(null);
 
-  const loadingStages = [
-    'Analyzing video...',
-    '✓ Video uploaded & validated',
-    '→ Detecting violence with X3D-M temporal model...',
-    '→ Locating violence timestamps & duration...',
-    '→ Detecting people in violence segments with YOLOv8...',
-    '→ Tracking people trajectories with ByteTrack...',
-    '→ Identifying students with ArcFace & Qdrant...',
-    '→ Generating evidence frames & clips...'
-  ];
-
-  // Clean up object URL and polling interval on unmount or file change
+  // Clean up object URL and polling on unmount
   useEffect(() => {
     return () => {
       if (pollIntervalRef.current) {
@@ -194,7 +179,7 @@ export const ViolenceDetection: React.FC = () => {
     } catch (err: any) {
       console.error('Video upload failed:', err);
       setUploadStatus('error');
-      const msg = err.response?.data?.detail || err.message || 'Failed to upload video to server. Please try again.';
+      const msg = err.response?.data?.detail || err.message || 'Unable to upload video to server.';
       setUploadError(msg);
     }
   };
@@ -216,6 +201,7 @@ export const ViolenceDetection: React.FC = () => {
     setErrorMessage(null);
     setFile(selectedFile);
     setAnalysisState('idle');
+    setAnalysisResult(null);
 
     if (videoPreviewUrl) {
       URL.revokeObjectURL(videoPreviewUrl);
@@ -224,7 +210,6 @@ export const ViolenceDetection: React.FC = () => {
     const url = URL.createObjectURL(selectedFile);
     setVideoPreviewUrl(url);
 
-    // Trigger backend upload with progress
     uploadVideoToServer(selectedFile);
   };
 
@@ -262,7 +247,11 @@ export const ViolenceDetection: React.FC = () => {
     }
   };
 
-  const handleRemoveVideo = () => {
+  const handleResetVideo = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
     if (videoPreviewUrl) {
       URL.revokeObjectURL(videoPreviewUrl);
     }
@@ -277,24 +266,26 @@ export const ViolenceDetection: React.FC = () => {
     setUploadError(null);
     setAnalysisState('idle');
     setErrorMessage(null);
+    setSelectedSegmentModalIndex(null);
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
     }
   };
 
-  // Trigger violence detection analysis through backend AI pipeline
+  // Start analysis
   const startAnalysis = async () => {
-    if (!file || !uploadedVideo) return;
+    if (!uploadedVideo || uploadStatus !== 'success' || analysisState === 'loading') return;
 
     setAnalysisState('loading');
-    setLoadingStep(0);
+    setAnalysisProgress(15);
     setErrorMessage(null);
-    setCurrentStageText('Connecting to Fight/Violence Detection Engine...');
+    setCurrentStageText('Starting temporal violence detection...');
 
     if (pollIntervalRef.current) {
       clearInterval(pollIntervalRef.current);
     }
 
+    // Polling interval
     pollIntervalRef.current = setInterval(async () => {
       try {
         const res = await api.get(`/violence/status/${uploadedVideo.video_id}`);
@@ -302,13 +293,38 @@ export const ViolenceDetection: React.FC = () => {
           setCurrentStageText(res.data.stage);
         }
         if (typeof res.data?.progress === 'number') {
-          const stepIndex = Math.min(loadingStages.length - 1, Math.floor((res.data.progress / 100) * loadingStages.length));
-          setLoadingStep(stepIndex);
+          setAnalysisProgress(res.data.progress);
+        }
+        if (res.data?.status === 'failed') {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          setAnalysisState('error');
+          setErrorMessage(res.data.error_message || 'Analysis failed on server.');
+        } else if (res.data?.status === 'completed' && !analysisResult) {
+          try {
+            const resultRes = await api.get<ViolenceAnalysisResponse>(`/violence/result/${uploadedVideo.video_id}`);
+            if (resultRes.data) {
+              if (pollIntervalRef.current) {
+                clearInterval(pollIntervalRef.current);
+                pollIntervalRef.current = null;
+              }
+              setAnalysisResult(resultRes.data);
+              if (resultRes.data.status === 'VIOLENCE_DETECTED' && resultRes.data.segments && resultRes.data.segments.length > 0) {
+                setAnalysisState('success_violence');
+              } else {
+                setAnalysisState('success_normal');
+              }
+            }
+          } catch {
+            // Wait for main analyze promise
+          }
         }
       } catch {
-        // Continue polling
+        // Keep polling
       }
-    }, 800);
+    }, 2000);
 
     try {
       const formData = new FormData();
@@ -323,105 +339,136 @@ export const ViolenceDetection: React.FC = () => {
 
       if (response.data.status === 'VIOLENCE_DETECTED' && response.data.segments && response.data.segments.length > 0) {
         setAnalysisState('success_violence');
-        setActiveSegmentIndex(0);
       } else {
         setAnalysisState('success_normal');
       }
     } catch (err: any) {
+      console.error('Violence analysis request failure:', err);
+
+      try {
+        const checkStatus = await api.get(`/violence/status/${uploadedVideo.video_id}`);
+        if (checkStatus.data?.status === 'failed') {
+          if (pollIntervalRef.current) {
+            clearInterval(pollIntervalRef.current);
+            pollIntervalRef.current = null;
+          }
+          setAnalysisState('error');
+          setErrorMessage(checkStatus.data.error_message || err.response?.data?.detail || 'Video processing encountered an error.');
+          return;
+        } else if (checkStatus.data?.status === 'processing') {
+          return;
+        }
+      } catch {
+        // Continue to error display
+      }
+
       if (pollIntervalRef.current) {
         clearInterval(pollIntervalRef.current);
         pollIntervalRef.current = null;
       }
-      console.error('Violence analysis failed:', err);
       setAnalysisState('error');
-      const detail = err.response?.data?.detail || err.message || 'Failed to complete violence detection analysis.';
+      let detail = err.response?.data?.detail;
+      if (!detail) {
+        if (err.message === 'Network Error') {
+          detail = 'Network or backend connection failed. The server may be processing or restarting.';
+        } else {
+          detail = err.message || 'Failed to complete violence detection analysis.';
+        }
+      }
       setErrorMessage(detail);
     }
   };
 
   const seekVideo = (seconds: number) => {
-    if (videoPlayerRef.current) {
-      videoPlayerRef.current.currentTime = seconds;
-      videoPlayerRef.current.play().catch(() => {});
+    if (mainVideoPlayerRef.current) {
+      mainVideoPlayerRef.current.currentTime = seconds;
+      mainVideoPlayerRef.current.play().catch(() => {});
     }
   };
 
-  const handleGenerateReport = async (activeSeg: ViolenceSegment) => {
-    setIsGeneratingReport(true);
-    try {
-      const payload = {
-        event_id: activeSeg.event_id && !activeSeg.event_id.startsWith('evt-demo') ? activeSeg.event_id : undefined,
-        incident_id: analysisResult?.incident_id || undefined,
-        video_id: (activeSeg.video_id && !activeSeg.video_id.startsWith('vid-demo')) ? activeSeg.video_id : (uploadedVideo?.video_id || undefined),
-        title: `Violence Incident Report - ${file?.name || uploadedVideo?.original_filename || 'CCTV Footage'}`,
-        additional_notes: activeSeg.explanation || undefined,
-      };
+  // Helper formatting
+  const formatSeconds = (sec?: number | null) => {
+    if (sec === undefined || sec === null) return '--';
+    const s = Math.round(sec);
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}:${rem.toString().padStart(2, '0')}`;
+  };
 
-      const res = await api.post('/violence/report', payload);
-      if (res.data && res.data.report_id) {
-        navigate(`/reports/${res.data.report_id}`);
-      } else {
-        navigate('/reports');
+  // Current segments list
+  const segments = analysisResult?.segments || [];
+  const activeModalSegment = selectedSegmentModalIndex !== null ? segments[selectedSegmentModalIndex] : null;
+
+  // Deduplicate and extract only confirmed student identities (memoized)
+  const confirmedPersons: InvolvedStudentCard[] = useMemo(() => {
+    const map = new Map<string, InvolvedStudentCard>();
+
+    segments.forEach((seg) => {
+      (seg.students || []).forEach((st) => {
+        if (st.student_id && st.is_identified && st.name && st.name !== 'Unidentified Person') {
+          const idKey = String(st.student_id);
+          if (!map.has(idKey)) {
+            map.set(idKey, st);
+          } else {
+            const existing = map.get(idKey)!;
+            if ((st.similarity_score ?? 0) > (existing.similarity_score ?? 0)) {
+              map.set(idKey, st);
+            }
+          }
+        }
+      });
+    });
+
+    (analysisResult?.identified_students || []).forEach((st) => {
+      if (st.student_id && st.is_identified && st.name && st.name !== 'Unidentified Person') {
+        const idKey = String(st.student_id);
+        if (!map.has(idKey)) {
+          map.set(idKey, st);
+        }
       }
-    } catch (err: any) {
-      console.error('Failed to generate violence report:', err);
-      // If backend reports call fails or in demo mode without DB incident, navigate to reports list
-      navigate('/reports');
-    } finally {
-      setIsGeneratingReport(false);
-    }
-  };
+    });
+
+    return Array.from(map.values());
+  }, [segments, analysisResult?.identified_students]);
 
   return (
-    <div className="space-y-8 py-2 max-w-7xl mx-auto">
-      {/* Page Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="space-y-6 max-w-7xl mx-auto pb-12">
+      {/* 1. COMPACT PAGE HEADER */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
         <div>
-          <div className="flex items-center space-x-3">
-            <div className="p-2.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400">
-              <Swords className="h-6 w-6" />
-            </div>
-            <div>
-              <h2 className="text-2xl font-bold text-slate-100">Violence Detection</h2>
-              <p className="text-slate-400 text-sm">
-                CCTV video analysis pipeline for automated physical fight and altercation detection with facial identity verification
-              </p>
-            </div>
-          </div>
+          <h1 className="text-xl font-bold text-slate-900 tracking-tight">Violence Detection</h1>
+          <p className="text-xs text-slate-500 mt-0.5">Review detected incidents and supporting footage.</p>
         </div>
-
-        {/* Action / State Helpers */}
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-2">
           <Link
             to="/events"
-            className="flex items-center space-x-2 text-xs font-semibold px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-dark-border transition"
+            className="inline-flex items-center space-x-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition"
           >
-            <ShieldAlert className="h-4 w-4 text-amber-400" />
             <span>Security Alerts Log</span>
+            <ArrowUpRight className="h-3.5 w-3.5 text-slate-400" />
+          </Link>
+          <Link
+            to="/reports"
+            className="inline-flex items-center space-x-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 transition"
+          >
+            <span>Incident Reports</span>
           </Link>
         </div>
       </div>
 
-      {/* Upload & Video Details Card */}
-      <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-xl space-y-6">
-        <div>
-          <h3 className="text-base font-bold text-slate-200">Surveillance Footage Ingestion</h3>
-          <p className="text-xs text-slate-400 mt-1">
-            Upload footage recorded from any campus CCTV angle to identify aggressive movements, physical clashes, and involved individuals.
-          </p>
-        </div>
-
-        {/* Drag-and-Drop Area */}
+      {/* 2. VIDEO SELECTION AND PREVIEW */}
+      <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs">
         {!file ? (
+          /* Upload dropzone */
           <div
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className={`border-2 border-dashed rounded-2xl p-10 text-center transition relative flex flex-col items-center justify-center cursor-pointer ${
+            className={`border border-dashed rounded-xl p-8 text-center transition flex flex-col items-center justify-center cursor-pointer ${
               isDragging 
-                ? 'border-blue-500 bg-blue-500/10' 
-                : 'border-dark-border hover:border-blue-500/60 bg-slate-900/30'
+                ? 'border-blue-500 bg-blue-50/50' 
+                : 'border-slate-300 hover:border-slate-400 bg-slate-50/50'
             }`}
           >
             <input
@@ -431,175 +478,138 @@ export const ViolenceDetection: React.FC = () => {
               onChange={handleFileInputChange}
               className="hidden"
             />
-            
-            <div className="p-4 rounded-2xl bg-blue-500/10 text-blue-400 mb-3 border border-blue-500/20 shadow-lg shadow-blue-500/10">
-              <UploadCloud className="h-8 w-8" />
+            <div className="p-3 rounded-full bg-white border border-slate-200 text-slate-600 mb-3 shadow-xs">
+              <Upload className="h-5 w-5" />
             </div>
-
-            <h4 className="text-sm font-semibold text-slate-200">
-              Click to choose video or drag and drop here
-            </h4>
-            <p className="text-xs text-slate-400 mt-1">
-              Supports standard surveillance formats: <span className="text-slate-300 font-mono">MP4, AVI, MKV, MOV</span>
+            <p className="text-sm font-semibold text-slate-800">
+              Select or drop surveillance video to begin
             </p>
-
-            <div className="mt-4 flex items-center space-x-2">
-              <button
-                type="button"
-                className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition flex items-center space-x-1.5"
-              >
-                <FileVideo className="h-3.5 w-3.5" />
-                <span>Choose Video</span>
-              </button>
-              <span className="text-[11px] text-slate-500 font-mono">Max size: 100MB</span>
-            </div>
+            <p className="text-xs text-slate-500 mt-1">
+              Supports MP4, AVI, MKV, or MOV up to 100MB
+            </p>
+            <button
+              type="button"
+              className="mt-4 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium shadow-xs transition"
+            >
+              Choose Video File
+            </button>
           </div>
         ) : (
-          /* Selected Video Preview & Details Card */
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 bg-slate-900/40 p-5 rounded-2xl border border-dark-border">
-            {/* Video Preview */}
-            <div className="lg:col-span-6 rounded-xl overflow-hidden bg-slate-950 border border-dark-border relative flex items-center justify-center min-h-[220px]">
-              {videoPreviewUrl && (
-                <video
-                  ref={videoPlayerRef}
-                  src={videoPreviewUrl}
-                  controls
-                  onLoadedMetadata={handleLoadedMetadata}
-                  className="w-full max-h-64 object-contain rounded-xl"
-                />
-              )}
-            </div>
-
-            {/* Video File Information & Actions */}
-            <div className="lg:col-span-6 flex flex-col justify-between space-y-4">
-              <div className="space-y-3">
-                <div className="flex items-start justify-between">
-                  <div className="space-y-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-500/10 border border-blue-500/20 px-2 py-0.5 rounded-full font-mono">
-                      Selected CCTV Footage
-                    </span>
-                    <h4 className="text-sm font-bold text-slate-200 break-all">{file.name}</h4>
-                  </div>
-                  <button
-                    onClick={handleRemoveVideo}
-                    disabled={analysisState === 'loading' || uploadStatus === 'uploading'}
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition disabled:opacity-40"
-                    title="Remove Video"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </div>
-
-                {/* Upload Status Card */}
-                {uploadStatus === 'uploading' && (
-                  <div className="space-y-2 p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/20">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="flex items-center space-x-2 text-blue-400 font-semibold">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        <span>Uploading CCTV Footage to Forensic Server...</span>
-                      </span>
-                      <span className="text-blue-400 font-mono font-bold">{uploadProgress}%</span>
-                    </div>
-                    <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                      <div
-                        className="bg-blue-500 h-1.5 rounded-full transition-all duration-200"
-                        style={{ width: `${uploadProgress}%` }}
-                      />
-                    </div>
-                    <p className="text-[11px] text-slate-400">Verifying stream container, decodable frames & extracting metadata</p>
-                  </div>
+          /* Selected video card & preview */
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Video preview container - Preserves aspect ratio */}
+              <div className="lg:col-span-7 bg-slate-950 rounded-lg overflow-hidden border border-slate-200 flex items-center justify-center min-h-[240px] max-h-[380px]">
+                {videoPreviewUrl && (
+                  <video
+                    ref={mainVideoPlayerRef}
+                    src={videoPreviewUrl}
+                    controls
+                    playsInline
+                    onLoadedMetadata={handleLoadedMetadata}
+                    className="w-full h-full max-h-[380px] object-contain"
+                  />
                 )}
+              </div>
 
-                {uploadStatus === 'success' && uploadedVideo && (
-                  <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-xs space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2 text-emerald-400 font-semibold">
-                        <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                        <span>Upload Succeeded & Verified on Server</span>
+              {/* Video metadata and actions */}
+              <div className="lg:col-span-5 flex flex-col justify-between space-y-4">
+                <div className="space-y-3">
+                  <div className="flex items-start justify-between">
+                    <div className="min-w-0 pr-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block">
+                        Footage File
+                      </span>
+                      <h3 className="text-sm font-semibold text-slate-900 truncate" title={file.name}>
+                        {file.name}
+                      </h3>
+                    </div>
+                    <button
+                      onClick={handleResetVideo}
+                      disabled={analysisState === 'loading' || uploadStatus === 'uploading'}
+                      className="p-1 rounded text-slate-400 hover:text-slate-600 disabled:opacity-40 transition"
+                      title="Remove footage"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {/* Upload State Banner */}
+                  {uploadStatus === 'uploading' && (
+                    <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs space-y-2">
+                      <div className="flex items-center justify-between text-slate-700">
+                        <span className="flex items-center space-x-1.5 font-medium">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                          <span>Uploading footage...</span>
+                        </span>
+                        <span className="font-mono text-slate-600">{uploadProgress}%</span>
                       </div>
-                      <span className="text-[10px] font-mono uppercase bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
-                        {uploadedVideo.status}
-                      </span>
+                      <div className="w-full bg-slate-200 rounded-full h-1 overflow-hidden">
+                        <div
+                          className="bg-blue-600 h-1 rounded-full transition-all duration-150"
+                          style={{ width: `${uploadProgress}%` }}
+                        />
+                      </div>
                     </div>
-                    <div className="flex items-center space-x-2 text-[11px] text-slate-400 font-mono">
-                      <span>Server Video ID:</span>
-                      <span className="text-emerald-300 font-bold bg-slate-900/60 px-2 py-0.5 rounded border border-dark-border select-all">
-                        {uploadedVideo.video_id}
-                      </span>
-                    </div>
-                  </div>
-                )}
+                  )}
 
-                {uploadStatus === 'error' && (
-                  <div className="p-3.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs space-y-2">
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center space-x-2 font-semibold">
-                        <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-                        <span>Upload or Validation Failed</span>
+                  {uploadStatus === 'error' && (
+                    <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700 flex items-start justify-between gap-2">
+                      <div className="flex items-start space-x-2">
+                        <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 mt-0.5" />
+                        <div>
+                          <p className="font-medium">Upload failed</p>
+                          <p className="text-[11px] text-red-600 mt-0.5">{uploadError}</p>
+                        </div>
                       </div>
                       <button
                         onClick={() => file && uploadVideoToServer(file)}
-                        className="px-2.5 py-1 bg-red-600/30 hover:bg-red-600/50 text-red-200 rounded-lg font-semibold text-[11px] transition cursor-pointer border border-red-500/30"
+                        className="px-2 py-1 bg-white hover:bg-red-100 text-red-700 rounded border border-red-200 text-[11px] font-medium transition shrink-0"
                       >
-                        Retry Upload
+                        Retry
                       </button>
                     </div>
-                    <p className="text-[11px] text-red-300/90 leading-relaxed">{uploadError}</p>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                    <span className="text-[10px] text-slate-500 font-semibold block uppercase">File Size</span>
-                    <span className="text-xs font-mono text-slate-300 font-bold">
-                      {(file.size / (1024 * 1024)).toFixed(2)} MB
-                    </span>
-                  </div>
-
-                  <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                    <span className="text-[10px] text-slate-500 font-semibold block uppercase">Format / Codec</span>
-                    <span className="text-xs font-mono text-slate-300 font-bold">
-                      {uploadedVideo?.codec || file.type || file.name.split('.').pop()?.toUpperCase()}
-                    </span>
-                  </div>
-
-                  {videoDuration !== null && (
-                    <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                      <span className="text-[10px] text-slate-500 font-semibold block uppercase">Duration</span>
-                      <span className="text-xs font-mono text-slate-300 font-bold">
-                        {videoDuration.toFixed(1)} seconds
-                      </span>
-                    </div>
                   )}
 
-                  {videoDimensions && (
-                    <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                      <span className="text-[10px] text-slate-500 font-semibold block uppercase">Resolution</span>
-                      <span className="text-xs font-mono text-slate-300 font-bold">
-                        {videoDimensions.width} × {videoDimensions.height} px
+                  {/* Essential Metadata Grid */}
+                  <div className="grid grid-cols-3 gap-2 py-1">
+                    <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/50">
+                      <span className="text-[10px] text-slate-500 uppercase font-medium block">Duration</span>
+                      <span className="text-xs font-semibold text-slate-800 font-mono">
+                        {formatSeconds(videoDuration || uploadedVideo?.duration)}
                       </span>
                     </div>
-                  )}
+                    <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/50">
+                      <span className="text-[10px] text-slate-500 uppercase font-medium block">Resolution</span>
+                      <span className="text-xs font-semibold text-slate-800 font-mono">
+                        {videoDimensions ? `${videoDimensions.width}×${videoDimensions.height}` : uploadedVideo?.width ? `${uploadedVideo.width}×${uploadedVideo.height}` : '--'}
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/50">
+                      <span className="text-[10px] text-slate-500 uppercase font-medium block">Status</span>
+                      <span className="text-xs font-medium text-slate-700 capitalize">
+                        {uploadStatus === 'uploading' ? 'Uploading' : uploadStatus === 'success' ? 'Ready' : uploadStatus === 'error' ? 'Failed' : 'Selected'}
+                      </span>
+                    </div>
+                  </div>
                 </div>
-              </div>
 
-              {/* Action Buttons */}
-              <div className="pt-4 border-t border-dark-border space-y-2">
-                <div className="flex items-center space-x-3">
+                {/* Actions */}
+                <div className="pt-2 border-t border-slate-100 flex items-center space-x-2">
                   <button
                     onClick={startAnalysis}
                     disabled={!uploadedVideo || uploadStatus !== 'success' || analysisState === 'loading'}
-                    className="flex-1 py-3 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white rounded-xl font-semibold shadow-lg shadow-red-500/20 transition flex items-center justify-center space-x-2 text-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    className="flex-1 py-2 px-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium shadow-xs transition flex items-center justify-center space-x-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     {analysisState === 'loading' ? (
                       <>
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                        <span>Analyzing Video Pipeline...</span>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>Analyzing Video...</span>
                       </>
                     ) : (
                       <>
-                        <Swords className="h-4 w-4" />
-                        <span>Analyze Video for Violence</span>
+                        <Activity className="h-3.5 w-3.5" />
+                        <span>Analyze Video</span>
                       </>
                     )}
                   </button>
@@ -608,7 +618,7 @@ export const ViolenceDetection: React.FC = () => {
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     disabled={analysisState === 'loading' || uploadStatus === 'uploading'}
-                    className="px-4 py-3 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded-xl text-xs font-semibold border border-dark-border transition"
+                    className="py-2 px-3 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-medium transition disabled:opacity-40"
                   >
                     Change Video
                   </button>
@@ -620,668 +630,271 @@ export const ViolenceDetection: React.FC = () => {
                     className="hidden"
                   />
                 </div>
-
-                {uploadStatus !== 'success' && (
-                  <p className="text-[11px] text-slate-500 text-center font-medium">
-                    {uploadStatus === 'uploading'
-                      ? 'Uploading and validating footage on forensic server...'
-                      : uploadStatus === 'error'
-                      ? 'Upload must succeed before violence analysis can be started.'
-                      : 'Please wait for upload verification to enable analysis.'}
-                  </p>
-                )}
               </div>
             </div>
-          </div>
-        )}
 
-        {/* Error State Banner */}
-        {errorMessage && (
-          <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-400 text-xs flex items-center justify-between">
-            <div className="flex items-center space-x-2">
-              <AlertTriangle className="h-4 w-4 flex-shrink-0" />
-              <span>{errorMessage}</span>
-            </div>
-            <button
-              onClick={() => setErrorMessage(null)}
-              className="text-slate-400 hover:text-slate-200"
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        )}
+            {/* 3. PROCESSING STATE */}
+            {analysisState === 'loading' && (
+              <div className="p-4 rounded-lg border border-slate-200 bg-slate-50/50 space-y-2 mt-3">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center space-x-2 text-slate-800 font-medium">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />
+                    <span>Analysis in progress</span>
+                    <span className="text-slate-400">•</span>
+                    <span className="text-slate-600 font-normal">{currentStageText}</span>
+                  </div>
+                  <span className="font-mono text-slate-600 text-[11px] font-semibold">{analysisProgress}%</span>
+                </div>
+                <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                  <div 
+                    className="bg-blue-600 h-1.5 rounded-full transition-all duration-300"
+                    style={{ width: `${Math.max(5, Math.min(100, analysisProgress))}%` }}
+                  />
+                </div>
+              </div>
+            )}
 
-        {/* Loading Progress State */}
-        {analysisState === 'loading' && (
-          <div className="p-6 rounded-2xl bg-slate-900/60 border border-dark-border space-y-4 animate-pulse">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-slate-200 font-semibold flex items-center space-x-2">
-                <Loader2 className="h-4 w-4 animate-spin text-red-400" />
-                <span>{currentStageText || loadingStages[loadingStep]}</span>
-              </span>
-              <span className="text-red-400 font-mono font-bold">
-                Step {loadingStep + 1} of {loadingStages.length}
-              </span>
-            </div>
-            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
-              <div 
-                className="bg-gradient-to-r from-red-600 to-rose-500 h-2 rounded-full transition-all duration-300"
-                style={{ width: `${((loadingStep + 1) / loadingStages.length) * 100}%` }}
-              />
-            </div>
-            <div className="grid grid-cols-3 gap-2 pt-2 text-[11px] text-slate-500 font-mono">
-              <span className="flex items-center space-x-1">
-                <CheckCircle2 className={`h-3 w-3 ${loadingStep >= 3 ? 'text-emerald-400' : 'text-slate-600'}`} />
-                <span>X3D-M Violence Detection</span>
-              </span>
-              <span className="flex items-center space-x-1">
-                <CheckCircle2 className={`h-3 w-3 ${loadingStep >= 5 ? 'text-emerald-400' : 'text-slate-600'}`} />
-                <span>Segment YOLOv8 + ByteTrack</span>
-              </span>
-              <span className="flex items-center space-x-1">
-                <CheckCircle2 className={`h-3 w-3 ${loadingStep >= 7 ? 'text-emerald-400' : 'text-slate-600'}`} />
-                <span>ArcFace & Evidence Dossier</span>
-              </span>
-            </div>
+            {/* ERROR STATE */}
+            {analysisState === 'error' && (
+              <div className="p-3.5 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700 flex items-start justify-between gap-3 mt-3">
+                <div className="flex items-start space-x-2">
+                  <AlertTriangle className="h-4 w-4 text-red-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold">Analysis failed</p>
+                    <p className="text-red-600 mt-0.5 leading-relaxed">{errorMessage || 'Video processing encountered an error.'}</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={startAnalysis}
+                  className="px-2.5 py-1 bg-white hover:bg-red-100 text-red-700 border border-red-200 rounded text-xs font-medium transition shrink-0"
+                >
+                  Retry analysis
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* Result State View */}
+      {/* 4. DETECTION RESULTS */}
       {(analysisState === 'success_violence' || analysisState === 'success_normal') && (
-        <div className="space-y-8 animate-in fade-in duration-300">
-          {/* Result Banner */}
-          <div className={`p-6 rounded-2xl border flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-xl ${
-            analysisState === 'success_violence'
-              ? 'bg-gradient-to-r from-red-950/40 via-red-900/20 to-slate-900 border-red-500/30'
-              : 'bg-gradient-to-r from-emerald-950/40 via-emerald-900/20 to-slate-900 border-emerald-500/30'
-          }`}>
-            <div className="flex items-center space-x-4">
-              <div className={`p-4 rounded-2xl border ${
-                analysisState === 'success_violence'
-                  ? 'bg-red-500/20 border-red-500/40 text-red-400'
-                  : 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
-              }`}>
-                {analysisState === 'success_violence' ? (
-                  <Swords className="h-8 w-8" />
-                ) : (
-                  <CheckCircle2 className="h-8 w-8" />
-                )}
-              </div>
-              <div>
-                <div className="flex items-center space-x-3">
-                  <span className={`text-xs font-bold px-3 py-1 rounded-full uppercase font-mono border ${
-                    analysisState === 'success_violence'
-                      ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                      : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
-                  }`}>
-                    {analysisState === 'success_violence' ? 'VIOLENCE CONFIRMED' : 'NORMAL BEHAVIOR'}
-                  </span>
-                  <span className="text-xs font-mono text-slate-400">
-                    Source: {analysisResult?.camera_name || 'Campus Surveillance'} ({analysisResult?.camera_location || 'Campus Area'})
-                  </span>
+        <div className="space-y-5">
+          {/* Verdict Banner */}
+          {analysisState === 'success_violence' ? (
+            <div className="p-4 rounded-xl border border-red-200 bg-red-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start space-x-3">
+                <div className="p-2 rounded-lg bg-red-100 text-red-700 shrink-0">
+                  <AlertTriangle className="h-5 w-5 text-red-600" />
                 </div>
-                <h3 className="text-xl font-bold text-slate-100 mt-1">
-                  {analysisResult?.verdict || (analysisState === 'success_violence'
-                    ? 'Detected physical fight / altercation segment'
-                    : 'Normal campus activity verified. No aggressive altercations detected.')}
-                </h3>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Footage: {file?.name || 'CCTV_Stream_Clip.mp4'} • Overall Violence Confidence: {analysisResult ? `${Math.round(analysisResult.overall_confidence * 100)}%` : '88%'}
-                </p>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold text-red-700 uppercase tracking-wide px-2 py-0.5 rounded bg-red-100 border border-red-200">
+                      Violence detected
+                    </span>
+                    <span className="text-xs font-mono text-slate-600">
+                      {segments.length} segment{segments.length !== 1 ? 's' : ''} identified
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-700 mt-1 leading-relaxed">
+                    Physical altercation detected in surveillance footage. Review segments and evidence below.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center space-x-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAnalysisState('idle');
+                    setAnalysisResult(null);
+                  }}
+                  className="p-1.5 bg-white hover:bg-slate-50 text-slate-600 rounded-lg border border-slate-200 text-xs transition"
+                  title="Reset analysis"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
-
-            {/* Test State Switcher & Action */}
-            <div className="flex items-center space-x-2">
+          ) : (
+            <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-start space-x-3">
+                <div className="p-2 rounded-lg bg-emerald-100 text-emerald-700 shrink-0">
+                  <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold text-emerald-700 uppercase tracking-wide px-2 py-0.5 rounded bg-emerald-100 border border-emerald-200">
+                      No violence detected
+                    </span>
+                    <span className="text-xs font-mono text-slate-600">
+                      Confidence: 0.0%
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
+                    No violence indicators detected in this footage. This analysis applies only to processed intervals.
+                  </p>
+                </div>
+              </div>
               <button
-                onClick={() => setAnalysisState(analysisState === 'success_violence' ? 'success_normal' : 'success_violence')}
-                className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold border border-dark-border transition"
-                title="Toggle Demo State"
-              >
-                Switch Verdict
-              </button>
-              <button
+                type="button"
                 onClick={() => {
                   setAnalysisState('idle');
                   setAnalysisResult(null);
                 }}
-                className="flex items-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold border border-dark-border transition"
+                className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-lg text-xs font-medium transition shrink-0"
               >
-                <RotateCcw className="h-3.5 w-3.5" />
-                <span>Reset</span>
+                Analyze Another Video
               </button>
             </div>
-          </div>
+          )}
 
-          {analysisState === 'success_violence' && (() => {
-            // Default demo segments if no backend segments available
-            const demoSegments: ViolenceSegment[] = [
-              {
-                segment_id: 'seg-demo-01',
-                event_id: 'evt-demo-01',
-                video_id: 'vid-demo-01',
-                start_time: 272.0,
-                end_time: 279.0,
-                duration: 7.0,
-                timestamp_display: '00:04:32 - 00:04:39',
-                confidence: 0.914,
-                severity: 'High',
-                breakdown: {
-                  motion_dynamics: 0.94,
-                  person_interaction: 0.91,
-                  clip_similarity: 0.88,
-                  temporal_persistence: 0.85,
-                },
-                explanation: 'Sudden velocity delta and close-contact physical struggle detected between multiple individuals.',
-                evidence_image: null,
-                evidence_video: null,
-                tracks: [
-                  {
-                    track_id: 'trk-17',
-                    tracker_id: 17,
-                    frame_number: 8160,
-                    timestamp_seconds: 272.4,
-                    bounding_box: [180, 210, 310, 520],
-                    confidence: 0.96,
-                    face_visible: true,
-                    identified_student: {
-                      student_id: 'stu-01',
-                      name: 'Student A',
-                      roll_number: '23',
-                      class_name: 'S6 CSE',
-                      programme: 'S6 CSE',
-                      section: 'A',
-                      similarity_score: 0.947,
-                      confidence: 'high',
-                      is_identified: true,
-                      track_id: '17',
-                      event_id: 'evt-demo-01'
-                    }
-                  },
-                  {
-                    track_id: 'trk-23',
-                    tracker_id: 23,
-                    frame_number: 8160,
-                    timestamp_seconds: 272.8,
-                    bounding_box: [330, 195, 460, 515],
-                    confidence: 0.94,
-                    face_visible: true,
-                    identified_student: {
-                      student_id: 'stu-02',
-                      name: 'Student B',
-                      roll_number: '41',
-                      class_name: 'S6 CSE',
-                      programme: 'S6 CSE',
-                      section: 'B',
-                      similarity_score: 0.912,
-                      confidence: 'high',
-                      is_identified: true,
-                      track_id: '23',
-                      event_id: 'evt-demo-01'
-                    }
-                  }
-                ],
-                students: [
-                  {
-                    student_id: 'stu-01',
-                    name: 'Student A',
-                    roll_number: '23',
-                    class_name: 'S6 CSE',
-                    programme: 'S6 CSE',
-                    section: 'A',
-                    similarity_score: 0.947,
-                    confidence: 'high',
-                    is_identified: true,
-                    track_id: '17',
-                    event_id: 'evt-demo-01'
-                  },
-                  {
-                    student_id: 'stu-02',
-                    name: 'Student B',
-                    roll_number: '41',
-                    class_name: 'S6 CSE',
-                    programme: 'S6 CSE',
-                    section: 'B',
-                    similarity_score: 0.912,
-                    confidence: 'high',
-                    is_identified: true,
-                    track_id: '23',
-                    event_id: 'evt-demo-01'
-                  }
-                ]
-              }
-            ];
+          {/* If Violence Detected: Compact Segments Table & Details */}
+          {analysisState === 'success_violence' && (
+            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-xs">
+              <div className="p-4 border-b border-slate-200 flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-slate-900">Detected Altercation Segments</h2>
+                  <p className="text-xs text-slate-500 mt-0.5">Chronological breakdown of flagged intervals</p>
+                </div>
+                <span className="text-xs font-mono font-medium text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                  Total: {segments.length}
+                </span>
+              </div>
 
-            const segmentsList = (analysisResult?.segments && analysisResult.segments.length > 0)
-              ? analysisResult.segments
-              : demoSegments;
+              {/* Compact Segments Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-[11px] uppercase tracking-wider font-medium">
+                      <th className="py-2.5 px-4">#</th>
+                      <th className="py-2.5 px-4">Time Range</th>
+                      <th className="py-2.5 px-4">Duration</th>
+                      <th className="py-2.5 px-4">Confidence</th>
+                      <th className="py-2.5 px-4">Severity</th>
+                      <th className="py-2.5 px-4">Persons</th>
+                      <th className="py-2.5 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {segments.map((seg, idx) => {
+                      const personsCount = seg.persons_count ?? seg.students?.length ?? 0;
+                      const confPercent = Math.round(seg.confidence * 100);
 
-            const activeSeg = segmentsList[activeSegmentIndex] || segmentsList[0];
+                      return (
+                        <tr key={seg.segment_id || idx} className="hover:bg-slate-50/70 transition">
+                          <td className="py-2.5 px-4 font-mono font-medium text-slate-700">
+                            {idx + 1}
+                          </td>
+                          <td className="py-2.5 px-4 font-mono font-semibold text-slate-900">
+                            {seg.timestamp_display}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-600 font-mono">
+                            {Math.round(seg.duration)}s
+                          </td>
+                          <td className="py-2.5 px-4 font-mono font-bold text-red-600">
+                            {confPercent}%
+                          </td>
+                          <td className="py-2.5 px-4">
+                            <span className={`inline-block px-2 py-0.5 rounded text-[11px] font-medium uppercase font-mono ${
+                              seg.severity.toLowerCase() === 'high'
+                                ? 'bg-red-50 text-red-700 border border-red-200'
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}>
+                              {seg.severity}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-600">
+                            <span className="inline-flex items-center space-x-1">
+                              <Users className="h-3 w-3 text-slate-400" />
+                              <span>{personsCount > 0 ? `${personsCount} observed` : 'Unassigned'}</span>
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-right space-x-2">
+                            <button
+                              type="button"
+                              onClick={() => seekVideo(seg.start_time)}
+                              className="px-2 py-1 text-slate-600 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 rounded text-xs transition inline-flex items-center space-x-1"
+                              title="Jump to time in footage"
+                            >
+                              <Play className="h-3 w-3" />
+                              <span>Jump</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedSegmentModalIndex(idx);
+                                setEvidenceMediaType(seg.evidence_video ? 'clip' : 'frame');
+                              }}
+                              className="px-2.5 py-1 text-blue-700 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded text-xs font-medium transition inline-flex items-center space-x-1"
+                            >
+                              <span>View evidence</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
 
-            // Resolve Video and Camera metadata
-            const videoName = analysisResult?.video_title 
-              || uploadedVideo?.original_filename 
-              || file?.name 
-              || 'Campus_Camera_03.mp4';
-
-            const cameraName = analysisResult?.camera_name 
-              || (analysisResult?.camera_location ? `Camera #03 - ${analysisResult.camera_location}` : 'Block A - Ground Floor');
-
-            // Resolve Persons List for table
-            const personsList: InvolvedStudentCard[] = (activeSeg?.students && activeSeg.students.length > 0)
-              ? activeSeg.students
-              : (analysisResult?.identified_students && analysisResult.identified_students.length > 0)
-              ? analysisResult.identified_students
-              : (demoSegments[0].students || []);
-
-            // Resolve Track Information Mappings: Track {id} → {student/unidentified}
-            const trackMappings: {
-              tracker_id: number;
-              student_name: string;
-              is_identified: boolean;
-              class_name?: string | null;
-              confidence?: number;
-              person_crop?: string | null;
-              bounding_box?: number[];
-            }[] = (() => {
-              if (activeSeg?.tracks && activeSeg.tracks.length > 0) {
-                const map: { [id: number]: any } = {};
-                for (const trk of activeSeg.tracks) {
-                  if (!map[trk.tracker_id]) {
-                    const st = trk.identified_student 
-                      || personsList.find(p => p.track_id === trk.track_id || p.track_id === String(trk.tracker_id));
-                    map[trk.tracker_id] = {
-                      tracker_id: trk.tracker_id,
-                      student_name: st?.is_identified ? st.name : (st?.name || 'Unidentified Person'),
-                      is_identified: Boolean(st?.is_identified),
-                      class_name: st?.class_name || (st?.programme ? `${st.programme} ${st.section || ''}` : null),
-                      confidence: trk.confidence,
-                      person_crop: trk.person_crop,
-                      bounding_box: trk.bounding_box
-                    };
-                  }
-                }
-                return Object.values(map);
-              }
-              // Fallback default track mapping matching prompt specification
-              return [
-                {
-                  tracker_id: 17,
-                  student_name: 'Student A',
-                  is_identified: true,
-                  class_name: 'S6 CSE',
-                  confidence: 0.96,
-                  person_crop: null,
-                  bounding_box: [180, 210, 310, 520]
-                },
-                {
-                  tracker_id: 23,
-                  student_name: 'Student B',
-                  is_identified: true,
-                  class_name: 'S6 CSE',
-                  confidence: 0.94,
-                  person_crop: null,
-                  bounding_box: [330, 195, 460, 515]
-                }
-              ];
-            })();
-
-            const motion = Math.round((activeSeg?.breakdown?.motion_dynamics ?? 0.92) * 100);
-            const proximity = Math.round((activeSeg?.breakdown?.person_interaction ?? 0.88) * 100);
-            const clip = Math.round((activeSeg?.breakdown?.clip_similarity ?? 0.74) * 100);
-            const temporal = Math.round((activeSeg?.breakdown?.temporal_persistence ?? 0.80) * 100);
-
-            return (
-              <div className="space-y-8">
-                {/* ------------------------------------------------ */}
-                {/* 1. VIOLENCE DETECTION RESULT                      */}
-                {/* ------------------------------------------------ */}
-                <div className="bg-dark-card border border-red-500/40 rounded-2xl p-6 shadow-xl space-y-6">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-dark-border pb-4">
-                    <div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-bold text-red-400 uppercase tracking-widest bg-red-500/10 border border-red-500/20 px-2.5 py-1 rounded-md">
-                          RESULT OVERVIEW
-                        </span>
-                        <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                          VIOLENCE DETECTION RESULT
-                        </h3>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Automated multi-signal physical altercation verdict and forensic metadata
-                      </p>
-                    </div>
-
-                    {/* Multiple Events Switcher */}
-                    {segmentsList.length > 1 && (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-                          Events ({segmentsList.length}):
-                        </span>
-                        {segmentsList.map((seg, idx) => (
-                          <button
-                            key={seg.segment_id || idx}
-                            onClick={() => {
-                              setActiveSegmentIndex(idx);
-                              seekVideo(seg.start_time);
-                            }}
-                            className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition border cursor-pointer ${
-                              activeSegmentIndex === idx
-                                ? 'bg-red-600 text-white border-red-500 shadow-md shadow-red-500/20 ring-1 ring-red-400'
-                                : 'bg-slate-800 text-slate-300 border-dark-border hover:bg-slate-700'
-                            }`}
-                          >
-                            Event #{idx + 1}: {seg.timestamp_display} ({(seg.confidence * 100).toFixed(1)}%)
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* ⚠ VIOLENCE DETECTED Banner */}
-                  <div className="flex items-center justify-between p-4 rounded-xl bg-red-500/15 border border-red-500/30 text-red-300 shadow-inner">
-                    <div className="flex items-center space-x-3">
-                      <AlertTriangle className="h-6 w-6 text-red-400 animate-pulse flex-shrink-0" />
-                      <div>
-                        <span className="text-base font-black tracking-wider text-red-400 uppercase flex items-center space-x-2">
-                          <span>⚠ VIOLENCE DETECTED</span>
-                        </span>
-                        <p className="text-xs text-red-300/80 mt-0.5">
-                          High-intensity kinematic motion and aggressive physical struggle verified by detection engine.
-                        </p>
-                      </div>
-                    </div>
-                    <span className="hidden sm:inline-block text-xs font-mono font-bold px-3 py-1 rounded-full bg-red-500/20 text-red-400 border border-red-500/40">
-                      {activeSeg.severity.toUpperCase()} SEVERITY
+              {/* Identified Persons Section */}
+              <div className="p-4 border-t border-slate-200 bg-slate-50/50 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wide">
+                    Identified Persons
+                  </h3>
+                  {confirmedPersons.length > 0 && (
+                    <span className="text-[11px] font-mono text-slate-500">
+                      {confirmedPersons.length} confirmed {confirmedPersons.length === 1 ? 'match' : 'matches'}
                     </span>
-                  </div>
-
-                  {/* Metadata Grid (Video | Camera | Time | Duration | Violence Confidence) */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Video:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold truncate block mt-1" title={videoName}>
-                        {videoName}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Camera:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold truncate block mt-1" title={cameraName}>
-                        {cameraName}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Time:
-                      </span>
-                      <span className="text-sm font-mono text-red-400 font-bold block mt-1">
-                        {activeSeg.timestamp_display}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Duration:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold block mt-1">
-                        {Math.round(activeSeg.duration)} seconds
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-red-500/30">
-                      <span className="text-[11px] font-semibold text-red-400 uppercase tracking-wider block">
-                        Violence Confidence:
-                      </span>
-                      <span className="text-sm font-mono text-red-400 font-black block mt-1">
-                        {(activeSeg.confidence * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                  </div>
+                  )}
                 </div>
 
-                {/* ------------------------------------------------ */}
-                {/* 2. EVIDENCE                                       */}
-                {/* ------------------------------------------------ */}
-                <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-xl space-y-5">
-                  <div className="flex items-center justify-between border-b border-dark-border pb-3">
-                    <div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-bold text-blue-400 uppercase tracking-widest bg-blue-500/10 border border-blue-500/20 px-2.5 py-1 rounded-md">
-                          SECTION 2
-                        </span>
-                        <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                          EVIDENCE
-                        </h3>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Representative keyframe snapshot and isolated video altercation clip
-                      </p>
-                    </div>
-                    <span className="text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-lg border border-dark-border">
-                      Segment: {activeSeg.timestamp_display}
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    {/* [Detected Evidence Frame] */}
-                    <div className="bg-slate-900/80 border border-dark-border rounded-xl p-4 space-y-3 flex flex-col justify-between">
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
-                            <ImageIcon className="h-4 w-4 text-rose-400" />
-                            <span>[Detected Evidence Frame]</span>
-                          </span>
-                          <span className="text-[11px] font-mono text-slate-400">
-                            Keyframe at Altercation Peak
-                          </span>
-                        </div>
-
-                        <div 
-                          onClick={() => activeSeg.evidence_image && setSelectedEvidenceFrame(activeSeg.evidence_image)}
-                          className="rounded-xl overflow-hidden bg-slate-950 border border-dark-border aspect-video flex items-center justify-center relative cursor-pointer group"
-                        >
-                          {activeSeg.evidence_image ? (
-                            <>
-                              <AuthenticatedImage
-                                src={activeSeg.evidence_image}
-                                alt="Detected Evidence Frame"
-                                className="w-full h-full object-cover group-hover:scale-105 transition duration-200"
-                              />
-                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center space-x-2 text-white text-xs font-semibold">
-                                <Maximize2 className="h-4 w-4" />
-                                <span>[ View Full Evidence Frame ]</span>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="text-center p-6 text-slate-500">
-                              <ImageIcon className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                              <p className="text-xs">Representative evidence frame ready upon extraction</p>
-                              <span className="text-[10px] text-slate-600 block mt-1 font-mono">
-                                Snapshot: {activeSeg.timestamp_display.split(' - ')[0]}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="pt-2 flex items-center justify-between text-[11px] text-slate-400 font-mono">
-                        <span>Time: {activeSeg.timestamp_display.split(' - ')[0]}</span>
-                        {activeSeg.evidence_image && (
-                          <button
-                            type="button"
-                            onClick={() => setSelectedEvidenceFrame(activeSeg.evidence_image || null)}
-                            className="text-blue-400 hover:text-blue-300 font-semibold inline-flex items-center space-x-1 cursor-pointer"
-                          >
-                            <span>[Detected Evidence Frame]</span>
-                            <ArrowRight className="h-3 w-3" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* [ Play Evidence Clip ] */}
-                    <div className="bg-slate-900/80 border border-dark-border rounded-xl p-4 space-y-3 flex flex-col justify-between">
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-bold text-slate-200 uppercase tracking-wider flex items-center space-x-2">
-                            <Film className="h-4 w-4 text-blue-400" />
-                            <span>[ Play Evidence Clip ]</span>
-                          </span>
-                          <span className="text-[11px] font-mono text-slate-400">
-                            {Math.round(activeSeg.duration)}s Sub-Clip
-                          </span>
-                        </div>
-
-                        <div className="rounded-xl overflow-hidden bg-slate-950 border border-dark-border aspect-video flex items-center justify-center relative">
-                          {activeSeg.evidence_video ? (
-                            <video
-                              src={activeSeg.evidence_video}
-                              controls
-                              playsInline
-                              className="w-full h-full object-contain"
-                            />
-                          ) : (
-                            <div className="text-center p-6 text-slate-500">
-                              <Film className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                              <p className="text-xs">Evidence clip extraction complete</p>
-                              <span className="text-[10px] text-slate-600 block mt-1 font-mono">
-                                Altercation Window: {activeSeg.timestamp_display}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {activeSeg.evidence_video ? (
-                        <a
-                          href={activeSeg.evidence_video}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="w-full py-2.5 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white rounded-xl text-xs font-bold shadow-md shadow-red-500/20 transition flex items-center justify-center space-x-2"
-                        >
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                          <span>[ Play Evidence Clip ]</span>
-                        </a>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => seekVideo(activeSeg.start_time)}
-                          className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold border border-dark-border transition flex items-center justify-center space-x-2 cursor-pointer"
-                        >
-                          <Play className="h-3.5 w-3.5" />
-                          <span>[ Play Evidence Clip ] (Jump to Altercation)</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                {/* ------------------------------------------------ */}
-                {/* 3. PERSONS IDENTIFIED IN DETECTED VIOLENCE EVENT */}
-                {/* ------------------------------------------------ */}
-                <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-xl space-y-4">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-dark-border pb-3">
-                    <div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md">
-                          SECTION 3
-                        </span>
-                        <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                          PERSONS IDENTIFIED IN DETECTED VIOLENCE EVENT
-                        </h3>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Biometric facial recognition matches against registered campus directory. System reports identity presence in segment classified as violent.
-                      </p>
-                    </div>
-                    <span className="text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-lg border border-dark-border">
-                      {personsList.length} Person{personsList.length > 1 ? 's' : ''} Observed
-                    </span>
-                  </div>
-
-                  {/* Table: Photo | Name | Class | Roll Number | Identity Confidence */}
-                  <div className="overflow-x-auto rounded-xl border border-dark-border">
+                {confirmedPersons.length > 0 ? (
+                  <div className="overflow-x-auto rounded-lg border border-slate-200 bg-white">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
-                        <tr className="bg-slate-900/90 border-b border-slate-800 text-slate-400 font-mono uppercase text-[11px] tracking-wider">
-                          <th className="py-3 px-4">Photo</th>
-                          <th className="py-3 px-4">Name</th>
-                          <th className="py-3 px-4">Class</th>
-                          <th className="py-3 px-4">Roll Number</th>
-                          <th className="py-3 px-4 text-right">Identity Confidence</th>
+                        <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-[10px] uppercase tracking-wider font-medium">
+                          <th className="py-2 px-3 w-12">Photo</th>
+                          <th className="py-2 px-3">Student Name</th>
+                          <th className="py-2 px-3">Roll Number</th>
+                          <th className="py-2 px-3 text-right">Match Similarity</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-800/70 bg-slate-950/40">
-                        {personsList.map((person, pIdx) => {
-                          const isKnown = Boolean(person.is_identified && person.student_id);
-                          const identityPercent = person.similarity_score > 0 
-                            ? (person.similarity_score * 100).toFixed(1)
-                            : (isKnown ? '94.7' : '0.0');
+                      <tbody className="divide-y divide-slate-100">
+                        {confirmedPersons.map((person) => {
+                          const matchPercent = typeof person.similarity_score === 'number' && person.similarity_score > 0
+                            ? Math.round(person.similarity_score * 100)
+                            : null;
 
                           return (
-                            <tr 
-                              key={`${person.track_id || pIdx}-${person.student_id || 'unidentified'}`}
-                              className="hover:bg-slate-900/60 transition"
-                            >
-                              {/* Photo */}
-                              <td className="py-3 px-4">
-                                <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center">
-                                  {isKnown && person.profile_photo_url ? (
+                            <tr key={String(person.student_id)} className="hover:bg-slate-50/60 transition">
+                              <td className="py-2 px-3">
+                                <div className="w-8 h-8 rounded-md overflow-hidden bg-slate-100 border border-slate-200 flex items-center justify-center">
+                                  {person.profile_photo_url ? (
                                     <AuthenticatedImage
                                       src={person.profile_photo_url}
                                       alt={person.name}
                                       className="w-full h-full object-cover"
                                     />
                                   ) : (
-                                    <div className="flex flex-col items-center justify-center text-slate-500">
-                                      <Users className="h-5 w-5 opacity-40" />
-                                      <span className="text-[7px] mt-0.5">Unknown</span>
-                                    </div>
+                                    <Users className="h-3.5 w-3.5 text-slate-400" />
                                   )}
                                 </div>
                               </td>
-
-                              {/* Name */}
-                              <td className="py-3 px-4 font-semibold text-slate-200">
-                                <div className="flex items-center space-x-2">
-                                  <span className={isKnown ? 'text-slate-100 font-bold' : 'text-slate-400 italic'}>
-                                    {person.name}
-                                  </span>
-                                  {person.track_id && (
-                                    <span className="text-[10px] font-mono text-slate-500 bg-slate-800 px-1.5 py-0.5 rounded">
-                                      #{person.track_id.slice(0, 6)}
-                                    </span>
-                                  )}
-                                </div>
+                              <td className="py-2 px-3 font-medium text-slate-900">
+                                {person.name}
                               </td>
-
-                              {/* Class */}
-                              <td className="py-3 px-4 text-slate-300 font-mono">
-                                {person.class_name || (person.programme ? `${person.programme} ${person.section || ''}` : 'Unknown Class')}
+                              <td className="py-2 px-3 font-mono text-slate-600 text-[11px]">
+                                {person.roll_number || '--'}
                               </td>
-
-                              {/* Roll Number */}
-                              <td className="py-3 px-4 text-slate-300 font-mono">
-                                {person.roll_number || 'N/A'}
-                              </td>
-
-                              {/* Identity Confidence */}
-                              <td className="py-3 px-4 text-right font-mono">
-                                {isKnown ? (
-                                  <span className="inline-block px-2.5 py-1 rounded-full text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20">
-                                    {identityPercent}%
+                              <td className="py-2 px-3 text-right font-mono text-[11px]">
+                                {matchPercent !== null ? (
+                                  <span className="inline-block px-1.5 py-0.5 rounded font-medium text-emerald-700 bg-emerald-50 border border-emerald-200">
+                                    {matchPercent}%
                                   </span>
                                 ) : (
-                                  <span className="inline-block px-2.5 py-1 rounded-full text-xs font-bold text-amber-400 bg-amber-500/10 border border-amber-500/20">
-                                    Unidentified
-                                  </span>
+                                  <span className="text-slate-400">--</span>
                                 )}
                               </td>
                             </tr>
@@ -1290,437 +903,267 @@ export const ViolenceDetection: React.FC = () => {
                       </tbody>
                     </table>
                   </div>
-
-                  <div className="pt-1 text-[11px] text-slate-500 flex items-center space-x-2">
-                    <span className="w-1.5 h-1.5 rounded-full bg-blue-400 flex-shrink-0" />
-                    <span>
-                      Notice: Person identified in detected violence event indicates biometric presence in the segment classified as violent. Biometric recognition does not assign legal fault.
-                    </span>
+                ) : (
+                  <div className="p-3 rounded-lg bg-white border border-slate-200 text-xs text-slate-500">
+                    No confirmed identities in the flagged intervals.
                   </div>
-                </div>
-
-                {/* ------------------------------------------------ */}
-                {/* 4. TRACK INFORMATION                              */}
-                {/* ------------------------------------------------ */}
-                <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-xl space-y-4">
-                  <div className="flex items-center justify-between border-b border-dark-border pb-3">
-                    <div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-bold text-purple-400 uppercase tracking-widest bg-purple-500/10 border border-purple-500/20 px-2.5 py-1 rounded-md">
-                          SECTION 4
-                        </span>
-                        <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                          TRACK INFORMATION
-                        </h3>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Correlation of persistent ByteTrack trajectory IDs to resolved identities
-                      </p>
-                    </div>
-                    <span className="text-xs font-mono text-slate-400 bg-slate-900/80 px-3 py-1 rounded-lg border border-dark-border">
-                      {trackMappings.length} Track{trackMappings.length > 1 ? 's' : ''} Mapped
-                    </span>
-                  </div>
-
-                  {/* Clean Visual Mapping: Track 17 → Student A, Track 23 → Student B */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {trackMappings.map((mapItem, mIdx) => (
-                      <div
-                        key={`${mapItem.tracker_id}-${mIdx}`}
-                        className="bg-slate-900/80 border border-dark-border hover:border-slate-700 rounded-xl p-4 flex items-center justify-between transition shadow-sm"
-                      >
-                        <div className="flex items-center space-x-3 min-w-0">
-                          <div className="px-3 py-1.5 bg-blue-500/10 border border-blue-500/20 text-blue-400 rounded-lg text-xs font-mono font-bold flex items-center space-x-1.5 shrink-0">
-                            <Target className="h-3.5 w-3.5" />
-                            <span>Track {mapItem.tracker_id}</span>
-                          </div>
-
-                          <span className="text-slate-400 font-bold text-base">→</span>
-
-                          <div className="min-w-0">
-                            <span className={`text-xs font-bold block truncate ${
-                              mapItem.is_identified ? 'text-slate-100' : 'text-slate-400 italic'
-                            }`}>
-                              {mapItem.student_name}
-                            </span>
-                            <span className="text-[10px] font-mono text-slate-500 block truncate">
-                              {mapItem.class_name || (mapItem.is_identified ? 'Registered Student' : 'Unidentified Person')}
-                            </span>
-                          </div>
-                        </div>
-
-                        {mapItem.person_crop && (
-                          <div className="w-10 h-10 rounded-lg overflow-hidden bg-slate-950 border border-slate-800 shrink-0 ml-2">
-                            <AuthenticatedImage 
-                              src={mapItem.person_crop} 
-                              alt={`Track ${mapItem.tracker_id} crop`} 
-                              className="w-full h-full object-cover" 
-                            />
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                {/* ------------------------------------------------ */}
-                {/* 5. Complete CCTV Footage Playback & Threats       */}
-                {/* ------------------------------------------------ */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  {/* Full Video Playback */}
-                  <div className="lg:col-span-7 bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2 text-slate-200 font-bold text-sm">
-                        <VideoIcon className="h-4 w-4 text-blue-500" />
-                        <span>Complete Surveillance Footage Playback</span>
-                      </div>
-                      <span className="text-xs font-mono text-red-400 bg-red-500/10 border border-red-500/20 px-2.5 py-1 rounded-full">
-                        Altercation: {activeSeg.timestamp_display}
-                      </span>
-                    </div>
-
-                    <div className="rounded-xl overflow-hidden bg-slate-950 border border-dark-border relative">
-                      {videoPreviewUrl ? (
-                        <video
-                          ref={videoPlayerRef}
-                          src={videoPreviewUrl}
-                          controls
-                          className="w-full max-h-96 object-contain"
-                        />
-                      ) : (
-                        <div className="p-16 text-center text-slate-500 text-xs">
-                          CCTV footage stream ready
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Timestamp Bookmarks */}
-                    <div className="space-y-2 pt-2">
-                      <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
-                        Jump to Altercation Timestamp ({segmentsList.length} interval{segmentsList.length > 1 ? 's' : ''})
-                      </span>
-                      <div className="flex flex-wrap gap-2">
-                        {segmentsList.map((seg, idx) => (
-                          <button
-                            key={seg.segment_id || idx}
-                            onClick={() => {
-                              seekVideo(seg.start_time);
-                              setActiveSegmentIndex(idx);
-                            }}
-                            className={`flex items-center space-x-2 px-3.5 py-2 rounded-xl text-xs font-mono border shadow-md font-bold transition cursor-pointer ${
-                              activeSegmentIndex === idx
-                                ? 'bg-red-600 text-white border-red-500 shadow-red-500/20'
-                                : 'bg-slate-800 text-slate-300 border-dark-border hover:bg-slate-700'
-                            }`}
-                          >
-                            <Play className="h-3 w-3" />
-                            <span>{seg.timestamp_display} ({(seg.confidence * 100).toFixed(1)}% Conf.)</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Multi-Signal Kinematic Breakdown */}
-                  <div className="lg:col-span-5 bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2 text-slate-200 font-bold text-sm">
-                        <Activity className="h-4 w-4 text-rose-500" />
-                        <span>Kinematic Threat Signals</span>
-                      </div>
-                      <span className="text-xs font-mono text-slate-400">
-                        Score: {(activeSeg.confidence * 100).toFixed(1)}%
-                      </span>
-                    </div>
-
-                    <p className="text-xs text-slate-400 leading-relaxed">
-                      {activeSeg.explanation || 'Kinematic multi-signal indicators confirm high velocity delta and close-contact physical struggle.'}
-                    </p>
-
-                    <div className="space-y-3 pt-2">
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300 font-medium">Motion Dynamics (Kinematic Velocity)</span>
-                          <span className="text-slate-400 font-mono">{motion}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-2">
-                          <div className="bg-red-500 h-2 rounded-full transition-all duration-300" style={{ width: `${motion}%` }} />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300 font-medium">Person Proximity (Inter-Centroid Distance)</span>
-                          <span className="text-slate-400 font-mono">{proximity}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-2">
-                          <div className="bg-amber-500 h-2 rounded-full transition-all duration-300" style={{ width: `${proximity}%` }} />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300 font-medium">CLIP Semantic Video Match</span>
-                          <span className="text-slate-400 font-mono">{clip}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-2">
-                          <div className="bg-blue-500 h-2 rounded-full transition-all duration-300" style={{ width: `${clip}%` }} />
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="flex justify-between text-xs mb-1">
-                          <span className="text-slate-300 font-medium">Temporal Persistence (Overlap Duration)</span>
-                          <span className="text-slate-400 font-mono">{temporal}%</span>
-                        </div>
-                        <div className="w-full bg-slate-800 rounded-full h-2">
-                          <div className="bg-purple-500 h-2 rounded-full transition-all duration-300" style={{ width: `${temporal}%` }} />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-4 border-t border-dark-border">
-                      <button
-                        type="button"
-                        onClick={() => handleGenerateReport(activeSeg)}
-                        disabled={isGeneratingReport}
-                        className="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold shadow-md shadow-blue-500/20 transition flex items-center justify-center space-x-2 cursor-pointer"
-                      >
-                        {isGeneratingReport ? (
-                          <>
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                            <span>Compiling Forensic Incident Report...</span>
-                          </>
-                        ) : (
-                          <>
-                            <FileText className="h-3.5 w-3.5" />
-                            <span>Generate Forensic Incident Report</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+                )}
               </div>
-            );
-          })()}
-
-          {/* ------------------------------------------------ */}
-          {/* Empty / No-Violence Result View                  */}
-          {/* ------------------------------------------------ */}
-          {analysisState === 'success_normal' && (() => {
-            const videoName = analysisResult?.video_title 
-              || uploadedVideo?.original_filename 
-              || file?.name 
-              || 'Campus_Camera_03.mp4';
-
-            const cameraName = analysisResult?.camera_name 
-              || (analysisResult?.camera_location ? `Camera #03 - ${analysisResult.camera_location}` : 'Block A - Ground Floor');
-
-            const durSeconds = videoDuration ? Math.round(videoDuration) : 90;
-
-            return (
-              <div className="space-y-6">
-                <div className="bg-dark-card border border-emerald-500/40 rounded-2xl p-6 shadow-xl space-y-6">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-dark-border pb-4">
-                    <div>
-                      <div className="flex items-center space-x-3">
-                        <span className="text-xs font-mono font-bold text-emerald-400 uppercase tracking-widest bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-md">
-                          RESULT OVERVIEW
-                        </span>
-                        <h3 className="text-lg font-bold text-slate-100 uppercase tracking-wider">
-                          VIOLENCE DETECTION RESULT
-                        </h3>
-                      </div>
-                      <p className="text-xs text-slate-400 mt-1">
-                        Surveillance footage evaluated for kinematic threats and physical altercations
-                      </p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAnalysisState('idle');
-                        setAnalysisResult(null);
-                      }}
-                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-dark-border rounded-xl text-xs font-semibold transition cursor-pointer"
-                    >
-                      Analyze Another Video
-                    </button>
-                  </div>
-
-                  {/* Banner: ✓ NO VIOLENCE DETECTED */}
-                  <div className="flex items-center justify-between p-4 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 shadow-inner">
-                    <div className="flex items-center space-x-3">
-                      <CheckCircle2 className="h-6 w-6 text-emerald-400 flex-shrink-0" />
-                      <div>
-                        <span className="text-base font-black tracking-wider text-emerald-400 uppercase">
-                          ✓ NO VIOLENCE DETECTED
-                        </span>
-                        <p className="text-xs text-emerald-300/80 mt-0.5">
-                          Normal campus activity verified. Zero aggressive altercations or physical threats detected in footage.
-                        </p>
-                      </div>
-                    </div>
-                    <span className="hidden sm:inline-block text-xs font-mono font-bold px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40">
-                      NORMAL BASELINE
-                    </span>
-                  </div>
-
-                  {/* Metadata Grid */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Video:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold truncate block mt-1" title={videoName}>
-                        {videoName}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Camera:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold truncate block mt-1" title={cameraName}>
-                        {cameraName}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Time:
-                      </span>
-                      <span className="text-sm font-mono text-slate-200 font-bold block mt-1">
-                        00:00:00 - {videoDuration ? `${Math.floor(videoDuration / 60).toString().padStart(2, '0')}:${Math.floor(videoDuration % 60).toString().padStart(2, '0')}` : '00:01:30'}
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-dark-border">
-                      <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                        Duration:
-                      </span>
-                      <span className="text-sm font-mono text-slate-100 font-bold block mt-1">
-                        {durSeconds} seconds
-                      </span>
-                    </div>
-
-                    <div className="bg-slate-900/90 p-4 rounded-xl border border-emerald-500/30">
-                      <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider block">
-                        Violence Confidence:
-                      </span>
-                      <span className="text-sm font-mono text-emerald-400 font-black block mt-1">
-                        0.0%
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Surveillance Video Playback for Normal Video */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-                  <div className="lg:col-span-7 bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center space-x-2 text-slate-200 font-bold text-sm">
-                        <VideoIcon className="h-4 w-4 text-emerald-400" />
-                        <span>Surveillance Footage Playback</span>
-                      </div>
-                      <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2.5 py-1 rounded-full font-bold">
-                        Normal Campus Baseline
-                      </span>
-                    </div>
-
-                    <div className="rounded-xl overflow-hidden bg-slate-950 border border-dark-border relative">
-                      {videoPreviewUrl ? (
-                        <video
-                          ref={videoPlayerRef}
-                          src={videoPreviewUrl}
-                          controls
-                          className="w-full max-h-96 object-contain"
-                        />
-                      ) : (
-                        <div className="p-16 text-center text-slate-500 text-xs">
-                          Video source ready
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="lg:col-span-5 bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-                    <div className="flex items-center space-x-3">
-                      <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
-                        <CheckCircle2 className="h-6 w-6" />
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-bold text-slate-100">Zero Physical Altercations Detected</h4>
-                        <p className="text-xs text-slate-400">Multi-Signal Fight Model Baseline</p>
-                      </div>
-                    </div>
-
-                    <p className="text-xs text-slate-300 leading-relaxed bg-slate-900/60 p-4 rounded-xl border border-dark-border">
-                      Full CCTV footage was analyzed through the kinematic motion velocity, spatial proximity, and CLIP semantic alignment pipelines. No aggressive interactions or physical altercation signatures crossed the forensic security threshold (0.30).
-                    </p>
-
-                    <div className="grid grid-cols-2 gap-3 pt-2">
-                      <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                        <span className="text-[10px] text-slate-500 font-semibold block uppercase">Threat Index</span>
-                        <span className="text-xs font-mono text-emerald-400 font-bold">0.00 (Normal)</span>
-                      </div>
-                      <div className="bg-slate-900/80 p-3 rounded-xl border border-dark-border">
-                        <span className="text-[10px] text-slate-500 font-semibold block uppercase">Altercation Segments</span>
-                        <span className="text-xs font-mono text-slate-300 font-bold">0 Segments</span>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAnalysisState('idle');
-                        setAnalysisResult(null);
-                      }}
-                      className="w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-dark-border rounded-xl text-xs font-semibold transition cursor-pointer"
-                    >
-                      Analyze Another Video
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
+            </div>
+          )}
         </div>
       )}
 
-      {/* Evidence Frame Lightbox Modal */}
-      {selectedEvidenceFrame && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-dark-border rounded-2xl max-w-4xl w-full p-4 space-y-3 relative shadow-2xl">
-            <div className="flex items-center justify-between border-b border-dark-border pb-3">
-              <div className="flex items-center space-x-2">
-                <ImageIcon className="h-5 w-5 text-rose-400" />
-                <span className="text-sm font-bold text-slate-100 uppercase tracking-wider">
-                  Detected Evidence Frame Preview
+      {/* 5. FOCUSED EVIDENCE MODAL (PART C) */}
+      {activeModalSegment && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-xl max-w-5xl w-full max-h-[90vh] flex flex-col shadow-xl overflow-hidden">
+            {/* Modal Header */}
+            <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50/70">
+              <div className="flex items-center space-x-3">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-700">
+                  Evidence Review
+                </span>
+                <span className="text-slate-300">•</span>
+                <span className="text-xs font-mono font-semibold text-slate-900">
+                  {activeModalSegment.timestamp_display}
+                </span>
+                <span className="text-[11px] font-mono text-slate-500">
+                  (Segment {(selectedSegmentModalIndex ?? 0) + 1} of {segments.length})
                 </span>
               </div>
+
+              <div className="flex items-center space-x-1.5">
+                {segments.length > 1 && (
+                  <div className="flex items-center space-x-1 mr-2">
+                    <button
+                      type="button"
+                      disabled={(selectedSegmentModalIndex ?? 0) <= 0}
+                      onClick={() => setSelectedSegmentModalIndex((prev) => (prev !== null ? Math.max(0, prev - 1) : 0))}
+                      className="p-1 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-200 disabled:opacity-30 transition"
+                      title="Previous segment"
+                    >
+                      <ChevronLeft className="h-4 w-4" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={(selectedSegmentModalIndex ?? 0) >= segments.length - 1}
+                      onClick={() => setSelectedSegmentModalIndex((prev) => (prev !== null ? Math.min(segments.length - 1, prev + 1) : 0))}
+                      className="p-1 rounded text-slate-600 hover:text-slate-900 hover:bg-slate-200 disabled:opacity-30 transition"
+                      title="Next segment"
+                    >
+                      <ChevronRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setSelectedSegmentModalIndex(null)}
+                  className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-5 overflow-y-auto grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* Left Column: Media Player (Preserves Aspect Ratio) */}
+              <div className="lg:col-span-7 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    {activeModalSegment.evidence_video && (
+                      <button
+                        type="button"
+                        onClick={() => setEvidenceMediaType('clip')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium transition inline-flex items-center space-x-1 ${
+                          evidenceMediaType === 'clip'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <Film className="h-3 w-3" />
+                        <span>Video Clip</span>
+                      </button>
+                    )}
+                    {activeModalSegment.evidence_image && (
+                      <button
+                        type="button"
+                        onClick={() => setEvidenceMediaType('frame')}
+                        className={`px-2.5 py-1 rounded text-xs font-medium transition inline-flex items-center space-x-1 ${
+                          evidenceMediaType === 'frame'
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <ImageIcon className="h-3 w-3" />
+                        <span>Keyframe Frame</span>
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-500">
+                    Duration: {Math.round(activeModalSegment.duration)}s
+                  </span>
+                </div>
+
+                <div className="bg-slate-950 rounded-lg overflow-hidden border border-slate-200 aspect-video flex items-center justify-center relative">
+                  {evidenceMediaType === 'clip' && activeModalSegment.evidence_video ? (
+                    <video
+                      src={activeModalSegment.evidence_video}
+                      controls
+                      autoPlay
+                      playsInline
+                      className="w-full h-full object-contain"
+                    />
+                  ) : activeModalSegment.evidence_image ? (
+                    <AuthenticatedImage
+                      src={activeModalSegment.evidence_image}
+                      alt="Evidence Frame"
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <div className="text-center p-6 text-slate-500 text-xs">
+                      No standalone evidence asset available for this interval.
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between text-xs text-slate-500 pt-1">
+                  <span>Footage: {file?.name || 'Surveillance Clip'}</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      seekVideo(activeModalSegment.start_time);
+                      setSelectedSegmentModalIndex(null);
+                    }}
+                    className="text-blue-600 hover:text-blue-700 font-medium inline-flex items-center space-x-1"
+                  >
+                    <Play className="h-3 w-3" />
+                    <span>Jump to time in main player</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Right Column: Compact Investigation Metadata */}
+              <div className="lg:col-span-5 space-y-4">
+                <div className="space-y-2 border-b border-slate-100 pb-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block">
+                    Incident Classification
+                  </span>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold text-slate-900">
+                      Physical Altercation / Violence
+                    </span>
+                    <span className="px-2 py-0.5 rounded text-xs font-mono font-bold bg-red-50 text-red-700 border border-red-200">
+                      {Math.round(activeModalSegment.confidence * 100)}% Confidence
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    {activeModalSegment.explanation || 'Kinematic indicators confirm high velocity delta and close-contact physical struggle.'}
+                  </p>
+                </div>
+
+                {/* Key Metadata Grid */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/50">
+                    <span className="text-[10px] text-slate-500 uppercase block">Camera</span>
+                    <span className="font-semibold text-slate-800 truncate block mt-0.5">
+                      {analysisResult?.camera_name || 'Campus Surveillance'}
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/50">
+                    <span className="text-[10px] text-slate-500 uppercase block">Location</span>
+                    <span className="font-semibold text-slate-800 truncate block mt-0.5">
+                      {analysisResult?.camera_location || 'Campus Zone'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Kinematic Signal Breakdown */}
+                <div className="space-y-2 pt-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block">
+                    Multi-Signal Breakdown
+                  </span>
+                  <div className="space-y-1.5 text-xs">
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-0.5">
+                        <span className="text-slate-600">Motion Velocity</span>
+                        <span className="font-mono text-slate-700 font-medium">
+                          {Math.round((activeModalSegment.breakdown?.motion_dynamics ?? 0.9) * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-100 rounded-full h-1">
+                        <div 
+                          className="bg-red-500 h-1 rounded-full" 
+                          style={{ width: `${Math.round((activeModalSegment.breakdown?.motion_dynamics ?? 0.9) * 100)}%` }} 
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-0.5">
+                        <span className="text-slate-600">Inter-Person Proximity</span>
+                        <span className="font-mono text-slate-700 font-medium">
+                          {Math.round((activeModalSegment.breakdown?.person_interaction ?? 0.85) * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-100 rounded-full h-1">
+                        <div 
+                          className="bg-amber-500 h-1 rounded-full" 
+                          style={{ width: `${Math.round((activeModalSegment.breakdown?.person_interaction ?? 0.85) * 100)}%` }} 
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <div className="flex justify-between text-[11px] mb-0.5">
+                        <span className="text-slate-600">CLIP Semantic Match</span>
+                        <span className="font-mono text-slate-700 font-medium">
+                          {Math.round((activeModalSegment.breakdown?.clip_similarity ?? 0.75) * 100)}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-slate-100 rounded-full h-1">
+                        <div 
+                          className="bg-blue-600 h-1 rounded-full" 
+                          style={{ width: `${Math.round((activeModalSegment.breakdown?.clip_similarity ?? 0.75) * 100)}%` }} 
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Persons observed in this segment */}
+                {activeModalSegment.students && activeModalSegment.students.length > 0 && (
+                  <div className="space-y-1.5 pt-1">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 block">
+                      Observed Individuals
+                    </span>
+                    <div className="space-y-1.5">
+                      {activeModalSegment.students.map((st, sIdx) => (
+                        <div key={sIdx} className="p-2 rounded border border-slate-200 bg-slate-50/50 flex items-center justify-between text-xs">
+                          <span className={st.is_identified ? 'font-semibold text-slate-900' : 'text-slate-600 italic'}>
+                            {st.name}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-500">
+                            {st.roll_number ? `Roll ${st.roll_number}` : 'Unidentified'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between text-xs text-slate-500">
+              <span className="font-mono text-[11px]">
+                Technical Reference: {activeModalSegment.segment_id.slice(0, 8)}
+              </span>
               <button
                 type="button"
-                onClick={() => setSelectedEvidenceFrame(null)}
-                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="rounded-xl overflow-hidden bg-black max-h-[75vh] flex items-center justify-center">
-              <AuthenticatedImage
-                src={selectedEvidenceFrame || ''}
-                alt="Full Evidence Frame"
-                className="w-full h-full object-contain"
-              />
-            </div>
-            <div className="flex justify-between items-center text-xs text-slate-400 pt-1">
-              <span>Forensic CCTV Altercation Keyframe</span>
-              <button
-                type="button"
-                onClick={() => setSelectedEvidenceFrame(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl font-semibold transition cursor-pointer"
+                onClick={() => setSelectedSegmentModalIndex(null)}
+                className="px-3 py-1.5 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg text-slate-700 font-medium transition"
               >
                 Close
               </button>
@@ -1731,3 +1174,5 @@ export const ViolenceDetection: React.FC = () => {
     </div>
   );
 };
+
+export default ViolenceDetection;

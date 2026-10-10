@@ -22,27 +22,27 @@ export const DeleteConfirmationModal: React.FC<DeleteConfirmationModalProps> = (
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-6 animate-in fade-in zoom-in-95 duration-150">
+      <div className="bg-white border border-slate-200 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-6 animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}
         <div className="flex items-start justify-between">
-          <div className="flex items-center space-x-3 text-red-500">
-            <div className="bg-red-500/10 p-2 rounded-xl">
-              <AlertTriangle className="h-6 w-6" />
+          <div className="flex items-center space-x-3 text-red-600">
+            <div className="bg-red-50 p-2 rounded-xl border border-red-100">
+              <AlertTriangle className="h-6 w-6 text-red-600" />
             </div>
-            <h3 className="text-lg font-bold text-slate-100">{title}</h3>
+            <h3 className="text-lg font-bold text-slate-900">{title}</h3>
           </div>
           <button 
             onClick={onClose}
             disabled={isLoading}
-            className="text-slate-400 hover:text-slate-200 transition disabled:opacity-50"
+            className="text-slate-400 hover:text-slate-600 transition disabled:opacity-50"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
         {/* Message */}
-        <p className="text-sm text-slate-300 leading-relaxed">
+        <p className="text-sm text-slate-600 leading-relaxed">
           {message}
         </p>
 
@@ -52,7 +52,7 @@ export const DeleteConfirmationModal: React.FC<DeleteConfirmationModalProps> = (
             type="button"
             onClick={onClose}
             disabled={isLoading}
-            className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-sm font-semibold rounded-xl transition"
+            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-700 text-sm font-semibold rounded-xl transition"
           >
             Cancel
           </button>
@@ -60,7 +60,7 @@ export const DeleteConfirmationModal: React.FC<DeleteConfirmationModalProps> = (
             type="button"
             onClick={onConfirm}
             disabled={isLoading}
-            className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:bg-slate-800 disabled:text-slate-500 text-white text-sm font-semibold rounded-xl transition flex items-center space-x-1.5 shadow-lg shadow-red-500/10"
+            className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-slate-200 disabled:text-slate-400 text-white text-sm font-semibold rounded-xl transition flex items-center space-x-1.5 shadow-sm"
           >
             {isLoading ? (
               <span className="flex items-center space-x-1.5">

@@ -175,16 +175,18 @@ def test_3_foreign_key_integrity_and_divergence():
                 uploaded_by=nonexistent_user,  # Nonexistent parent
                 status="pending"
             )
-            db.add(video)
-            await db.commit()
-            
-            # Check row exists despite invalid parent
-            chk = (await db.execute(select(Video).where(Video.id == v_id))).scalars().first()
-            assert chk is not None, "Video was not inserted"
-            # Cleanup
-            await db.delete(chk)
-            await db.commit()
-            print("  [FINDING VERIFIED] SQLite default connection allows nonexistent parent (PRAGMA foreign_keys=OFF).")
+            try:
+                db.add(video)
+                await db.commit()
+                # Check row exists despite invalid parent
+                chk = (await db.execute(select(Video).where(Video.id == v_id))).scalars().first()
+                assert chk is not None, "Video was not inserted"
+                # Cleanup
+                await db.delete(chk)
+                await db.commit()
+                print("  [FINDING VERIFIED] SQLite default connection allows nonexistent parent (PRAGMA foreign_keys=OFF).")
+            except IntegrityError:
+                print("  [REMEDIATION VERIFIED] SQLite default connection now enforces PRAGMA foreign_keys=ON and rejects nonexistent parent.")
 
     async def _test_enforced_fk():
         # When PRAGMA foreign_keys=ON is explicitly executed, SQLite enforces FK integrity

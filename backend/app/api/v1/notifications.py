@@ -20,6 +20,17 @@ from fastapi import Query
 from app.core.config import settings
 from app.db.session import SessionLocal
 
+from starlette.websockets import WebSocketState
+
+async def _safe_close(websocket: WebSocket, code: int = status.WS_1008_POLICY_VIOLATION):
+    try:
+        app_state = getattr(websocket, "application_state", None)
+        client_state = getattr(websocket, "client_state", None)
+        if app_state != WebSocketState.DISCONNECTED and client_state != WebSocketState.DISCONNECTED:
+            await websocket.close(code=code)
+    except Exception:
+        pass
+
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -28,7 +39,7 @@ async def websocket_endpoint(
     client_ip = websocket.client.host if websocket.client else "unknown"
     if ws_manager.is_rate_limited(client_ip):
         logger.warning(f"WebSocket connection rejected: IP {client_ip} is rate limited.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
         return
 
     auth_token = token
@@ -39,7 +50,7 @@ async def websocket_endpoint(
 
     if not auth_token:
         logger.warning("WebSocket auth failed: Missing authentication credentials.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
         return
 
     try:
@@ -51,7 +62,7 @@ async def websocket_endpoint(
         user_id = payload.get("sub")
         if not user_id:
             logger.warning("WebSocket auth failed: claim payload missing subject.")
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
             return
 
         async with SessionLocal() as db:
@@ -60,49 +71,72 @@ async def websocket_endpoint(
             user = res.scalars().first()
             if not user or not user.is_active:
                 logger.warning(f"WebSocket auth failed: User {user_id} is inactive or does not exist.")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
                 return
 
             role = payload.get("role", "operator")
             if role not in ["operator", "admin"]:
                 logger.warning(f"WebSocket auth failed: Incompatible user role '{role}' for user {user_id}.")
-                await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+                await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
                 return
 
     except jwt.ExpiredSignatureError:
         logger.warning("WebSocket auth failed: Signature has expired.")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
         return
     except jwt.PyJWTError as e:
         logger.warning(f"WebSocket auth failed: JWT decoding error: {str(e)}")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
         return
     except Exception as e:
         logger.error(f"WebSocket auth unexpected exception: {str(e)}")
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
         return
 
-    await ws_manager.connect(websocket)
+    connected = await ws_manager.connect(websocket, user_id=str(user_id))
+    if not connected:
+        return
+
     try:
         while True:
             data = await websocket.receive_text()
             if data == "PING":
                 await websocket.send_text("PONG")
-    except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+    except (WebSocketDisconnect, RuntimeError, Exception) as exc:
+        logger.debug(f"WebSocket session ended: {exc}")
+    finally:
+        ws_manager.disconnect(websocket, user_id=str(user_id))
 
 @router.get("", response_model=List[NotificationResponse])
 async def list_notifications(
+    unread_only: bool = Query(False, description="Filter for unread notifications only"),
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
-    stmt = (
-        select(Notification)
-        .filter(Notification.user_id == current_user.id)
-        .order_by(Notification.created_at.desc())
-    )
+    stmt = select(Notification).filter(Notification.user_id == current_user.id)
+    if unread_only:
+        stmt = stmt.filter(Notification.is_read == False)
+    stmt = stmt.order_by(Notification.created_at.desc())
     res = await db.execute(stmt)
     return res.scalars().all()
+
+@router.delete("/{id}", status_code=status.HTTP_200_OK)
+async def delete_notification(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    stmt = select(Notification).filter(Notification.id == id, Notification.user_id == current_user.id)
+    res = await db.execute(stmt)
+    noti = res.scalars().first()
+    if not noti:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Notification not found."
+        )
+    await db.delete(noti)
+    await db.commit()
+    return {"message": "Notification deleted successfully."}
 
 @router.put("/{id}/read", response_model=NotificationResponse)
 async def mark_notification_read(

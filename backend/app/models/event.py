@@ -29,7 +29,8 @@ class Event(Base):
     )
     confidence: Mapped[str] = mapped_column(String(50), default="high", nullable=False)  # high, medium, unknown
 
-    tracks = relationship("EventTrack", back_populates="event", cascade="all, delete-orphan", lazy="selectin")
+    tracks = relationship("EventTrack", back_populates="event", cascade="all, delete-orphan", passive_deletes=True, lazy="selectin")
+    video = relationship("Video", back_populates="events", passive_deletes=True)
 
 class EventTrack(Base):
     id: Mapped[uuid.UUID] = mapped_column(
@@ -42,4 +43,5 @@ class EventTrack(Base):
         UUID(as_uuid=True), ForeignKey("tracks.id", ondelete="CASCADE"), nullable=False
     )
 
-    event = relationship("Event", back_populates="tracks")
+    event = relationship("Event", back_populates="tracks", passive_deletes=True)
+    track = relationship("Track", backref="event_tracks", passive_deletes=True)

@@ -82,16 +82,16 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
 
   if (loading) {
     return (
-      <div className={`flex items-center justify-center bg-slate-900/60 animate-pulse ${className}`}>
-        <span className="text-[10px] text-slate-500 font-mono">Loading...</span>
+      <div className={`flex items-center justify-center bg-slate-100 animate-pulse ${className}`}>
+        <span className="text-[10px] text-slate-400 font-mono">Loading...</span>
       </div>
     );
   }
 
   if (error || !objectUrl) {
     return (
-      <div className={`flex items-center justify-center bg-slate-900 text-slate-600 ${className}`}>
-        {fallbackIcon || <ImageIcon className="h-6 w-6 text-slate-600" />}
+      <div className={`flex items-center justify-center bg-slate-100 text-slate-400 ${className}`}>
+        {fallbackIcon || <ImageIcon className="h-6 w-6 text-slate-400" />}
       </div>
     );
   }

@@ -3,7 +3,7 @@ import logging
 from typing import Any, List
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from sqlalchemy import select
+from sqlalchemy import select, or_, cast, String, delete
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -122,13 +122,109 @@ async def generate_report(
                 return existing
         raise exc
 
+from app.models.student import Student
+from sqlalchemy.orm import selectinload
+
+async def _enrich_report_student_academic_details(db: AsyncSession, report_data: dict) -> dict:
+    if not isinstance(report_data, dict):
+        return report_data
+    
+    student_ids = set()
+    roll_numbers = set()
+    
+    involved = report_data.get("involved_students")
+    if isinstance(involved, list):
+        for s in involved:
+            if isinstance(s, dict):
+                sid = s.get("student_id") or s.get("id")
+                if sid:
+                    try:
+                        student_ids.add(uuid.UUID(str(sid)))
+                    except Exception:
+                        pass
+                roll = s.get("roll_number") or s.get("university_roll_number")
+                if roll:
+                    roll_numbers.add(str(roll).strip())
+                    
+    single_st = report_data.get("student_info")
+    if isinstance(single_st, dict):
+        sid = single_st.get("student_id") or single_st.get("id")
+        if sid:
+            try:
+                student_ids.add(uuid.UUID(str(sid)))
+            except Exception:
+                pass
+        roll = single_st.get("roll_number") or single_st.get("university_roll_number")
+        if roll:
+            roll_numbers.add(str(roll).strip())
+
+    if not student_ids and not roll_numbers:
+        return report_data
+
+    conditions = []
+    if student_ids:
+        conditions.append(Student.id.in_(student_ids))
+    if roll_numbers:
+        conditions.append(Student.university_roll_number.in_(roll_numbers))
+        
+    st_stmt = select(Student).options(selectinload(Student.photos)).filter(or_(*conditions))
+    st_res = await db.execute(st_stmt)
+    students = st_res.scalars().all()
+    
+    student_map = {}
+    for st in students:
+        student_map[str(st.id)] = st
+        if st.university_roll_number:
+            student_map[st.university_roll_number] = st
+
+    def _enrich_single(s_dict: dict) -> dict:
+        sid = str(s_dict.get("student_id") or s_dict.get("id") or "")
+        roll = str(s_dict.get("roll_number") or s_dict.get("university_roll_number") or "")
+        st_obj = student_map.get(sid) or student_map.get(roll)
+        if not st_obj:
+            return s_dict
+            
+        enriched = dict(s_dict)
+        enriched["name"] = st_obj.name
+        enriched["roll_number"] = st_obj.university_roll_number or s_dict.get("roll_number") or "Not available"
+        cls_name = st_obj.programme or s_dict.get("class") or "Not available"
+        enriched["programme"] = st_obj.programme or "Not available"
+        enriched["class"] = cls_name
+        enriched["class_name"] = cls_name
+        enriched["department"] = st_obj.department or s_dict.get("department") or "Not available"
+        enriched["year"] = st_obj.year if st_obj.year is not None else s_dict.get("year")
+        enriched["semester"] = st_obj.semester if st_obj.semester is not None else s_dict.get("semester")
+        enriched["section"] = st_obj.section or s_dict.get("section") or "Not available"
+        
+        if not enriched.get("profile_photo_url") and st_obj.photos:
+            front_photo = next((p for p in st_obj.photos if (p.view or "").lower() == "front"), None) or st_obj.photos[0]
+            p_path = (front_photo.photo_path or "").replace("\\", "/")
+            if "storage/" in p_path:
+                enriched["profile_photo_url"] = "/" + p_path[p_path.find("storage/"):]
+            elif p_path:
+                enriched["profile_photo_url"] = f"/{p_path.lstrip('/')}"
+        return enriched
+
+    if isinstance(involved, list):
+        report_data["involved_students"] = [_enrich_single(s) for s in involved if isinstance(s, dict)]
+    if isinstance(single_st, dict):
+        report_data["student_info"] = _enrich_single(single_st)
+
+    return report_data
+
 @router.get("/{id}", response_model=ReportResponse)
 async def get_report(
     id: uuid.UUID,
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
-    stmt = select(Report).filter(Report.id == id)
+    stmt = select(Report).filter(
+        or_(
+            Report.id == id,
+            cast(Report.id, String) == id.hex,
+            cast(Report.id, String) == str(id)
+        )
+    )
     res = await db.execute(stmt)
     report_obj = res.scalars().first()
     if not report_obj:
@@ -142,7 +238,51 @@ async def get_report(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report not found."
         )
+    
+    # Enrich student academic details and profile photo without mutating database record
+    rep_data = dict(report_obj.data) if isinstance(report_obj.data, dict) else {}
+    rep_data = await _enrich_report_student_academic_details(db, rep_data)
+    report_obj.data = rep_data
     return report_obj
+
+@router.delete("/{id}")
+async def delete_report(
+    id: uuid.UUID,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    stmt = select(Report).filter(
+        or_(
+            Report.id == id,
+            cast(Report.id, String) == id.hex,
+            cast(Report.id, String) == str(id)
+        )
+    )
+    res = await db.execute(stmt)
+    report_obj = res.scalars().first()
+    if not report_obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found."
+        )
+    rep_owner = (report_obj.data or {}).get("created_by") if isinstance(report_obj.data, dict) else None
+    if rep_owner and rep_owner != str(current_user.id) and (current_user.role or "").lower() != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to delete this report."
+        )
+    
+    logger.info(f"Deleting report {report_obj.id} by user {current_user.id}")
+    del_stmt = delete(Report).where(
+        or_(
+            Report.id == id,
+            cast(Report.id, String) == id.hex,
+            cast(Report.id, String) == str(id)
+        )
+    )
+    await db.execute(del_stmt)
+    await db.commit()
+    return {"detail": "Report deleted successfully"}
 
 @router.get("/download/{id}")
 async def download_report(
@@ -151,7 +291,13 @@ async def download_report(
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
-    stmt = select(Report).filter(Report.id == id)
+    stmt = select(Report).filter(
+        or_(
+            Report.id == id,
+            cast(Report.id, String) == id.hex,
+            cast(Report.id, String) == str(id)
+        )
+    )
     res = await db.execute(stmt)
     report_obj = res.scalars().first()
     if not report_obj:

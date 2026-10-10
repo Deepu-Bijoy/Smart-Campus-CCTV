@@ -23,9 +23,9 @@ export const DetectionCard: React.FC<DetectionCardProps> = ({
   return (
     <div
       onClick={onClick}
-      className="bg-dark-card border border-dark-border rounded-xl overflow-hidden hover:border-blue-500/50 transition cursor-pointer shadow-md"
+      className="bg-white border border-slate-200 rounded-xl overflow-hidden hover:border-blue-500/50 hover:shadow-md transition cursor-pointer shadow-sm"
     >
-      <div className="aspect-square bg-slate-950 flex items-center justify-center relative overflow-hidden group">
+      <div className="aspect-square bg-slate-100 flex items-center justify-center relative overflow-hidden group">
         <img
           src={imageUrl}
           alt={objectClass}
@@ -35,18 +35,18 @@ export const DetectionCard: React.FC<DetectionCardProps> = ({
           }}
         />
         {score && (
-          <div className="absolute top-2 right-2 bg-blue-600 text-white font-mono text-xs px-2 py-0.5 rounded border border-blue-500/30">
+          <div className="absolute top-2 right-2 bg-blue-600 text-white font-mono text-xs px-2 py-0.5 rounded shadow-sm">
             {(score * 100).toFixed(0)}% Match
           </div>
         )}
       </div>
       <div className="p-4">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-xs font-semibold text-blue-500 uppercase tracking-wider">{objectClass}</span>
-          <span className="text-xs text-slate-400 font-mono">{timestamp.toFixed(1)}s</span>
+          <span className="text-xs font-semibold text-blue-600 uppercase tracking-wider">{objectClass}</span>
+          <span className="text-xs text-slate-500 font-mono">{timestamp.toFixed(1)}s</span>
         </div>
-        <div className="flex items-center text-xs text-slate-400 space-x-1">
-          <Eye className="h-3.5 w-3.5 text-slate-500" />
+        <div className="flex items-center text-xs text-slate-500 space-x-1">
+          <Eye className="h-3.5 w-3.5 text-slate-400" />
           <span>{camera}</span>
         </div>
       </div>

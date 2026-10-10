@@ -64,7 +64,7 @@ export const CameraDetails: React.FC = () => {
       <div className="flex items-center justify-between">
         <button
           onClick={() => navigate('/cameras')}
-          className="flex items-center space-x-2 text-slate-400 hover:text-slate-200 transition text-sm font-semibold"
+          className="flex items-center space-x-2 text-slate-600 hover:text-slate-900 transition text-sm font-semibold"
         >
           <ArrowLeft className="h-4 w-4" />
           <span>Back to Catalog</span>
@@ -75,20 +75,20 @@ export const CameraDetails: React.FC = () => {
               deleteCameraMutation.mutate();
             }
           }}
-          className="bg-red-600/10 hover:bg-red-600/20 text-red-500 hover:text-red-400 border border-red-500/20 px-4 py-2 rounded-xl text-xs font-bold transition"
+          className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-xl text-xs font-bold transition"
         >
           Decommission Camera
         </button>
       </div>
 
       {/* Summary card */}
-      <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md flex items-center space-x-5">
-        <div className="bg-blue-600/10 p-4 rounded-xl border border-blue-500/20">
-          <Video className="h-8 w-8 text-blue-500" />
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex items-center space-x-5">
+        <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
+          <Video className="h-8 w-8 text-blue-600" />
         </div>
         <div>
-          <h2 className="text-2xl font-bold text-slate-100">{camera?.name}</h2>
-          <p className="text-slate-400 text-xs mt-0.5">{camera?.building} — Floor {camera?.floor} ({camera?.location})</p>
+          <h2 className="text-2xl font-bold text-slate-900">{camera?.name}</h2>
+          <p className="text-slate-500 text-xs mt-0.5">{camera?.building} — Floor {camera?.floor} ({camera?.location})</p>
         </div>
       </div>
 
@@ -100,20 +100,20 @@ export const CameraDetails: React.FC = () => {
         </div>
 
         {/* Existing zones list */}
-        <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-          <div className="flex items-center space-x-2 text-slate-300 font-semibold border-b border-dark-border pb-3 mb-2">
-            <ShieldAlert className="h-4 w-4 text-blue-500" />
+        <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm space-y-4">
+          <div className="flex items-center space-x-2 text-slate-900 font-semibold border-b border-slate-200 pb-3 mb-2">
+            <ShieldAlert className="h-4 w-4 text-blue-600" />
             <span>Virtual Intrusion Boundaries</span>
           </div>
 
           <div className="space-y-3">
             {camera?.zones && camera.zones.length > 0 ? (
               camera.zones.map((zone: any) => (
-                <div key={zone.id} className="bg-slate-900/50 border border-dark-border rounded-xl p-4 flex items-center justify-between">
+                <div key={zone.id} className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center justify-between">
                   <div>
-                    <h4 className="font-semibold text-slate-200 text-sm">{zone.name}</h4>
+                    <h4 className="font-semibold text-slate-900 text-sm">{zone.name}</h4>
                     <div className="flex items-center space-x-2 mt-1.5">
-                      <span className="text-[10px] bg-blue-500/10 text-blue-400 border border-blue-500/20 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
+                      <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full uppercase tracking-wider font-bold">
                         {zone.zone_type}
                       </span>
                       <span className="text-[10px] text-slate-500 font-mono capitalize">
@@ -123,14 +123,14 @@ export const CameraDetails: React.FC = () => {
                   </div>
                   <button
                     onClick={() => deleteZoneMutation.mutate(zone.id)}
-                    className="text-slate-500 hover:text-red-400 transition p-1 rounded hover:bg-red-500/10 border border-transparent"
+                    className="text-slate-400 hover:text-red-600 transition p-1 rounded hover:bg-red-50 border border-transparent"
                   >
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               ))
             ) : (
-              <div className="text-center py-8 text-slate-500 text-sm">
+              <div className="text-center py-8 text-slate-400 text-sm">
                 No virtual zones defined for this camera footprint.
               </div>
             )}

@@ -5,8 +5,13 @@ import cv2
 
 logger = logging.getLogger(__name__)
 
+_ffmpeg_available_cache = None
+
 def is_ffmpeg_available() -> bool:
-    """Checks if FFmpeg is installed and accessible in the system path."""
+    """Checks if FFmpeg is installed and accessible in the system path (cached)."""
+    global _ffmpeg_available_cache
+    if _ffmpeg_available_cache is not None:
+        return _ffmpeg_available_cache
     try:
         startupinfo = None
         if os.name == 'nt':
@@ -20,9 +25,10 @@ def is_ffmpeg_available() -> bool:
             startupinfo=startupinfo,
             check=False
         )
-        return res.returncode == 0
+        _ffmpeg_available_cache = (res.returncode == 0)
     except Exception:
-        return False
+        _ffmpeg_available_cache = False
+    return _ffmpeg_available_cache
 
 def generate_subclip(video_path: str, timestamp: float, duration: float, output_path: str) -> bool:
     """
@@ -75,6 +81,7 @@ def generate_subclip(video_path: str, timestamp: float, duration: float, output_
                 "-i", video_path,
                 "-t", f"{actual_duration:.3f}",
                 "-c:v", "libx264",
+                "-preset", "ultrafast",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
                 "-movflags", "+faststart",

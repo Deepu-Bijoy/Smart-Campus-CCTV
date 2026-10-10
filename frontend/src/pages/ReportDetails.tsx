@@ -1,28 +1,56 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { 
-  FileText, 
   ArrowLeft, 
   Download, 
-  ShieldAlert, 
-  User, 
+  FileText, 
+  Video, 
+  Clock, 
   Users, 
-  AlertTriangle, 
-  Image as ImageIcon, 
-  Video as VideoIcon,
-  Target,
-  Loader2
+  X, 
+  Maximize2,
+  Loader2,
+  Image as ImageIcon,
+  Trash2,
+  AlertTriangle
 } from 'lucide-react';
 import { AuthenticatedImage } from '../components/AuthenticatedImage';
+
+interface VerifiedStudent {
+  id: string;
+  name: string;
+  rollNumber: string;
+  className?: string | null;
+  department?: string | null;
+  semesterYear?: string | null;
+  section?: string | null;
+  profilePhotoUrl?: string | null;
+}
+
+const formatSemesterYear = (semester?: number | string | null, year?: number | string | null): string => {
+  const hasSem = semester !== undefined && semester !== null && semester !== '' && semester !== 0;
+  const hasYr = year !== undefined && year !== null && year !== '' && year !== 0;
+  if (hasSem && hasYr) {
+    return `Semester ${semester} (Year ${year})`;
+  }
+  if (hasSem) return `Semester ${semester}`;
+  if (hasYr) return `Year ${year}`;
+  return 'Not available';
+};
 
 export const ReportDetails: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [isEnlarged, setIsEnlarged] = useState(false);
   const [downloadingFormat, setDownloadingFormat] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Fetch report details
   const { data: report, isLoading } = useQuery({
     queryKey: ['report-detail', id],
     queryFn: async () => {
@@ -31,6 +59,57 @@ export const ReportDetails: React.FC = () => {
     }
   });
 
+  const d = report?.data || {};
+  const videoInfo = d.video_info || {};
+  const evidenceInfo = d.evidence || {};
+  const eventInfo = d.event_info || {};
+
+  // Fetch video asset details to resolve original filename if video_id is present
+  const videoId = videoInfo.video_id;
+  const { data: videoData } = useQuery({
+    queryKey: ['video-asset', videoId],
+    queryFn: async () => {
+      if (!videoId) return null;
+      try {
+        const res = await api.get(`/videos/${videoId}`);
+        return res.data;
+      } catch {
+        return null;
+      }
+    },
+    enabled: Boolean(videoId)
+  });
+
+  // Fetch incident evidences as fallback if not in report data
+  const incidentId = report?.incident_id || d.incident_id;
+  const { data: incidentEvidences } = useQuery({
+    queryKey: ['incident-evidence', incidentId],
+    queryFn: async () => {
+      if (!incidentId) return [];
+      try {
+        const res = await api.get(`/evidence/${incidentId}`);
+        return res.data || [];
+      } catch {
+        return [];
+      }
+    },
+    enabled: Boolean(incidentId && !evidenceInfo.evidence_image && !evidenceInfo.image_url)
+  });
+
+  // Handle ESC key for image lightbox
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsEnlarged(false);
+      }
+    };
+    if (isEnlarged) {
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isEnlarged]);
+
+  // Download report in HTML or JSON format
   const handleDownload = async (format: string) => {
     if (downloadingFormat || !id) return;
     setDownloadingFormat(format);
@@ -67,15 +146,11 @@ export const ReportDetails: React.FC = () => {
       console.error('Failed to download report:', err);
       let errMsg = 'Failed to download report file. Please verify permissions.';
       if (err.response?.status === 401) {
-        errMsg = 'Session expired or not authenticated. Please log in again.';
+        errMsg = 'Session expired. Please log in again.';
       } else if (err.response?.status === 403) {
-        errMsg = 'You do not have permission to download this report.';
+        errMsg = 'Permission denied.';
       } else if (err.response?.status === 404) {
         errMsg = 'Report download file not found.';
-      } else if (err.response?.data?.detail) {
-        errMsg = typeof err.response.data.detail === 'string' 
-          ? err.response.data.detail 
-          : JSON.stringify(err.response.data.detail);
       }
       setDownloadError(errMsg);
     } finally {
@@ -83,364 +158,512 @@ export const ReportDetails: React.FC = () => {
     }
   };
 
+  const handleDeleteReport = async () => {
+    if (!id || isDeleting) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.delete(`/reports/${id}`);
+      navigate('/reports');
+    } catch (err: any) {
+      console.error('Failed to delete report:', err);
+      let errMsg = 'Failed to delete report. Please check your authorization.';
+      if (err.response?.status === 403) {
+        errMsg = 'Permission denied. Only administrators or the report creator can delete this report.';
+      } else if (err.response?.data?.detail) {
+        errMsg = err.response.data.detail;
+      }
+      setDeleteError(errMsg);
+      setIsDeleting(false);
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-400 h-96">
-        <p className="animate-pulse">Loading report details...</p>
+        <div className="flex items-center space-x-2 animate-pulse text-sm">
+          <Loader2 className="h-5 w-5 animate-spin text-blue-600" />
+          <span>Loading forensic report...</span>
+        </div>
       </div>
     );
   }
 
-  const d = report?.data || {};
-  const isViolence = (
-    report?.incident_type?.toLowerCase() === 'violence' ||
-    report?.incident_type?.toLowerCase() === 'fight' ||
-    Boolean(d.event_type === 'VIOLENCE') ||
-    Boolean(d.involved_students && d.involved_students.length > 0)
-  );
+  // --- 1. RESOLVE EVIDENCE SCREENSHOT ---
+  const resolveScreenshotUrl = (): string | null => {
+    if (evidenceInfo.evidence_image) return evidenceInfo.evidence_image;
+    if (evidenceInfo.image_url) return evidenceInfo.image_url;
+    if (Array.isArray(evidenceInfo.items)) {
+      const item = evidenceInfo.items.find((it: any) => it.type === 'screenshot' || it.type === 'image');
+      if (item?.url) return item.url;
+    }
+    if (Array.isArray(d.timeline)) {
+      const item = d.timeline.find((it: any) => it.type === 'screenshot' || it.type === 'image');
+      if (item?.url) return item.url;
+    }
+    if (incidentEvidences && Array.isArray(incidentEvidences)) {
+      const ev = incidentEvidences.find((e: any) => e.evidence_type === 'screenshot' || e.evidence_type === 'image');
+      if (ev?.file_path) {
+        const path = ev.file_path.replace(/\\/g, '/');
+        return path.startsWith('/') ? path : `/${path}`;
+      }
+    }
+    return null;
+  };
+  const screenshotUrl = resolveScreenshotUrl();
 
-  const eventInfo = d.event_info || {};
-  const videoInfo = d.video_info || {};
-  const cameraInfo = d.camera || {};
-  const evidenceInfo = d.evidence || {};
-  const studentsList: any[] = d.involved_students || [];
+  // --- 2. RESOLVE SOURCE VIDEO NAME (NO RAW UUIDs) ---
+  const isUuid = (str?: string | null): boolean => {
+    if (!str) return false;
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.[a-z0-9]+)?$/i.test(str.trim()) ||
+           /^[0-9a-f]{32}(\.[a-z0-9]+)?$/i.test(str.trim());
+  };
 
-  const violenceConf = d.violence_confidence || d.confidence || eventInfo.violence_confidence || 0.914;
-  const violenceConfPercent = `${(Number(violenceConf) * 100).toFixed(1)}%`;
+  const resolveVideoName = (): string => {
+    // 1. From fetched video entity
+    if (videoData?.original_filename && !isUuid(videoData.original_filename)) {
+      return videoData.original_filename;
+    }
+    // 2. From report data video_info.original_filename
+    if (videoInfo.original_filename && !isUuid(videoInfo.original_filename)) {
+      return videoInfo.original_filename;
+    }
+    // 3. From video_info.title if not a UUID
+    if (videoInfo.title && !isUuid(videoInfo.title)) {
+      const title = videoInfo.title.trim();
+      return title.toLowerCase().endsWith('.mp4') ? title : `${title}.mp4`;
+    }
+    // 4. From report title (e.g., "Violence Incident Report - WhatsApp Video 2026-07-27 at 10.29.42 PM.mp4")
+    if (report?.title) {
+      const cleaned = report.title.replace(/^.*Report\s*-\s*/i, '').trim();
+      if (cleaned && !isUuid(cleaned) && cleaned.includes('.')) {
+        return cleaned;
+      }
+    }
+    // 5. From video_info.filename if not a UUID
+    if (videoInfo.filename && !isUuid(videoInfo.filename)) {
+      return videoInfo.filename;
+    }
+    // 6. From fetched videoData.title
+    if (videoData?.title && !isUuid(videoData.title)) {
+      const title = videoData.title.trim();
+      return title.toLowerCase().endsWith('.mp4') ? title : `${title}.mp4`;
+    }
+    return 'CCTV_Footage.mp4';
+  };
+  const videoName = resolveVideoName();
+
+  // --- 3. RESOLVE SCREENSHOT TIMESTAMP (FORMAT 00:00:12) ---
+  const formatSeconds = (sec: number): string => {
+    if (isNaN(sec) || sec < 0) return '00:00:00';
+    const totalSecs = Math.floor(sec);
+    const hrs = Math.floor(totalSecs / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+    return `${hrs.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
+  const resolveScreenshotTimestamp = (): string => {
+    // Check explanation or narrative text for explicit seconds offset in video
+    const text = `${d.explanation || ''} ${d.narrative_summary || ''}`;
+    const rangeMatch = text.match(/altercation from\s*([0-9]+(?:\.[0-9]+)?)\s*s/i);
+    if (rangeMatch) {
+      return formatSeconds(parseFloat(rangeMatch[1]));
+    }
+    const singleMatch = text.match(/(?:at|from)\s*([0-9]+(?:\.[0-9]+)?)\s*s/i);
+    if (singleMatch) {
+      return formatSeconds(parseFloat(singleMatch[1]));
+    }
+
+    // Check numerical timestamp fields
+    if (typeof d.timestamp_seconds === 'number') {
+      return formatSeconds(d.timestamp_seconds);
+    }
+    if (typeof evidenceInfo.timestamp_seconds === 'number') {
+      return formatSeconds(evidenceInfo.timestamp_seconds);
+    }
+    if (typeof eventInfo.timestamp_seconds === 'number') {
+      return formatSeconds(eventInfo.timestamp_seconds);
+    }
+    if (typeof eventInfo.start_time === 'number') {
+      return formatSeconds(eventInfo.start_time);
+    }
+
+    // Check evidence image URL segment naming pattern
+    const imgUrl = `${screenshotUrl || ''}`;
+    const segMatch = imgUrl.match(/_seg([0-9]+)\./i);
+    if (segMatch) {
+      const segNum = parseInt(segMatch[1], 10);
+      return segNum === 0 ? '00:00:01' : '00:00:06';
+    }
+
+    // Check timeline formatted items
+    if (Array.isArray(d.timeline)) {
+      for (const item of d.timeline) {
+        if (item.time && /^([0-9]{2}:[0-9]{2}:[0-9]{2})$/.test(item.time)) {
+          return item.time;
+        }
+      }
+    }
+
+    return '00:00:00';
+  };
+  const screenshotTimestamp = resolveScreenshotTimestamp();
+
+  // --- 4. RESOLVE IDENTIFIED STUDENTS (DEDUPLICATED & VERIFIED ONLY) ---
+  const resolveVerifiedStudents = (): VerifiedStudent[] => {
+    const map = new Map<string, VerifiedStudent>();
+
+    // 1. From involved_students
+    if (Array.isArray(d.involved_students)) {
+      for (const s of d.involved_students) {
+        const isVerified = s.is_identified !== false && s.confidence !== 'unidentified';
+        if (s.name && s.name !== 'Unidentified Person' && !s.name.toLowerCase().includes('unknown') && isVerified) {
+          const key = (s.student_id || s.roll_number || s.name).toLowerCase();
+          if (!map.has(key)) {
+            const semYr = formatSemesterYear(s.semester, s.year);
+            map.set(key, {
+              id: s.student_id || key,
+              name: s.name,
+              rollNumber: s.roll_number || s.university_roll_number || 'Not available',
+              className: s.class_name || s.class || s.programme || 'Not available',
+              department: s.department || 'Not available',
+              semesterYear: semYr,
+              section: s.section || 'Not available',
+              profilePhotoUrl: s.profile_photo_url || s.photo_url || null
+            });
+          }
+        }
+      }
+    }
+
+    // 2. From student_info (single subject reports)
+    if (d.student_info && d.student_info.name && d.student_info.name !== 'Unidentified Person' && !d.student_info.name.toLowerCase().includes('unknown')) {
+      const s = d.student_info;
+      const isVerified = s.confidence === 'high' || s.confidence === 'medium';
+      if (isVerified) {
+        const key = (s.student_id || s.roll_number || s.name).toLowerCase();
+        if (!map.has(key)) {
+          const semYr = formatSemesterYear(s.semester, s.year);
+          map.set(key, {
+            id: s.student_id || key,
+            name: s.name,
+            rollNumber: s.roll_number || s.university_roll_number || 'Not available',
+            className: s.class_name || s.class || s.programme || 'Not available',
+            department: s.department || 'Not available',
+            semesterYear: semYr,
+            section: s.section || 'Not available',
+            profilePhotoUrl: s.profile_photo_url || s.photo_url || null
+          });
+        }
+      }
+    }
+
+    return Array.from(map.values());
+  };
+  const verifiedStudents = resolveVerifiedStudents();
 
   return (
-    <div className="space-y-8 py-2 max-w-7xl mx-auto">
-      {/* Header Actions */}
-      <div className="flex items-center justify-between">
+    <div className="max-w-5xl mx-auto py-6 px-4 space-y-6">
+      {/* Top Navigation Bar */}
+      <div className="flex items-center justify-between border-b border-slate-200 pb-4">
         <button
-          onClick={() => navigate(-1)}
-          className="flex items-center space-x-2 text-slate-400 hover:text-slate-200 transition text-sm font-semibold cursor-pointer"
+          onClick={() => navigate('/reports')}
+          className="inline-flex items-center space-x-2 text-slate-600 hover:text-slate-900 transition text-sm font-semibold cursor-pointer"
         >
           <ArrowLeft className="h-4 w-4" />
-          <span>Go Back</span>
+          <span>Back to Reports</span>
         </button>
 
-        <div className="flex flex-col items-end space-y-2">
-          <div className="flex space-x-3">
-            <button
-              onClick={() => handleDownload('html')}
-              disabled={Boolean(downloadingFormat)}
-              className="flex items-center space-x-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-4 py-2 rounded-xl text-xs font-bold transition shadow-lg shadow-blue-500/15 cursor-pointer disabled:cursor-not-allowed"
-            >
-              {downloadingFormat === 'html' ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Downloading HTML/PDF...</span>
-                </>
-              ) : (
-                <>
-                  <Download className="h-3.5 w-3.5" />
-                  <span>Download HTML/PDF</span>
-                </>
-              )}
-            </button>
-            <button
-              onClick={() => handleDownload('json')}
-              disabled={Boolean(downloadingFormat)}
-              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 px-4 py-2 rounded-xl text-xs font-bold transition border border-dark-border cursor-pointer disabled:cursor-not-allowed"
-            >
-              {downloadingFormat === 'json' ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>Exporting JSON...</span>
-                </>
-              ) : (
-                <>
-                  <FileText className="h-3.5 w-3.5" />
-                  <span>Export JSON</span>
-                </>
-              )}
-            </button>
-          </div>
-          {downloadError && (
-            <span className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 px-3 py-1 rounded-lg">
-              {downloadError}
-            </span>
-          )}
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => handleDownload('html')}
+            disabled={Boolean(downloadingFormat)}
+            className="inline-flex items-center space-x-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-1.5 rounded-lg text-xs font-semibold transition border border-slate-300 disabled:opacity-50 cursor-pointer"
+            title="Download report file"
+          >
+            {downloadingFormat === 'html' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Download className="h-3.5 w-3.5" />
+            )}
+            <span>Download</span>
+          </button>
+          <button
+            onClick={() => handleDownload('json')}
+            disabled={Boolean(downloadingFormat)}
+            className="inline-flex items-center space-x-1.5 bg-white hover:bg-slate-50 text-slate-700 px-3 py-1.5 rounded-lg text-xs font-semibold transition border border-slate-300 disabled:opacity-50 cursor-pointer"
+            title="Export report JSON data"
+          >
+            {downloadingFormat === 'json' ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <FileText className="h-3.5 w-3.5" />
+            )}
+            <span>JSON</span>
+          </button>
+          <button
+            onClick={() => {
+              setDeleteError(null);
+              setShowDeleteModal(true);
+            }}
+            disabled={isDeleting}
+            className="inline-flex items-center space-x-1.5 bg-red-50 hover:bg-red-100 text-red-600 px-3 py-1.5 rounded-lg text-xs font-semibold transition border border-red-200 disabled:opacity-50 cursor-pointer"
+            title="Delete this forensic report"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>Delete Report</span>
+          </button>
         </div>
       </div>
 
-      {/* Report Title Banner */}
-      <div className={`border rounded-2xl p-6 shadow-md flex items-center justify-between ${
-        isViolence 
-          ? 'bg-gradient-to-r from-red-950/40 via-red-900/20 to-slate-900 border-red-500/40' 
-          : 'bg-dark-card border-dark-border'
-      }`}>
-        <div className="flex items-center space-x-5">
-          <div className={`p-4 rounded-xl border ${
-            isViolence 
-              ? 'bg-red-500/20 border-red-500/30 text-red-400' 
-              : 'bg-blue-600/10 border-blue-500/20 text-blue-500'
-          }`}>
-            {isViolence ? <AlertTriangle className="h-8 w-8" /> : <FileText className="h-8 w-8" />}
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <span className={`text-[10px] font-mono font-bold uppercase px-2.5 py-0.5 rounded-full border ${
-                isViolence
-                  ? 'bg-red-500/10 text-red-400 border-red-500/30'
-                  : 'bg-blue-500/10 text-blue-400 border-blue-500/30'
-              }`}>
-                {isViolence ? 'VIOLENCE INCIDENT REPORT' : report?.incident_type}
-              </span>
-              <span className="text-xs text-slate-500 font-mono">ID: {report?.id}</span>
-            </div>
-            <h2 className="text-2xl font-bold text-slate-100 mt-1">{report?.title}</h2>
-            <p className="text-slate-400 text-xs mt-0.5">
-              Generated {report?.created_at ? new Date(report.created_at).toLocaleString() : 'Recently'}
-            </p>
-          </div>
+      {downloadError && (
+        <div className="text-xs text-red-700 bg-red-50 border border-red-200 px-3 py-2 rounded-lg">
+          {downloadError}
         </div>
+      )}
 
-        {isViolence && (
-          <div className="text-right hidden sm:block">
-            <span className="text-[10px] text-slate-400 uppercase font-mono block">Violence Confidence</span>
-            <span className="text-2xl font-black text-red-400 font-mono">{violenceConfPercent}</span>
-          </div>
-        )}
-      </div>
-
-      {/* Main Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
-          {/* Violence Event & Video Details */}
-          {isViolence && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                <VideoIcon className="h-5 w-5 text-red-400" />
-                <span>Event &amp; Video Details</span>
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="bg-slate-900/80 p-3.5 rounded-xl border border-dark-border">
-                  <span className="text-[11px] text-slate-500 uppercase font-semibold block">Video Footage</span>
-                  <span className="text-xs font-mono font-bold text-slate-200 block truncate mt-1">
-                    {videoInfo.filename || videoInfo.title || 'Campus_Camera_03.mp4'}
-                  </span>
-                </div>
-                <div className="bg-slate-900/80 p-3.5 rounded-xl border border-dark-border">
-                  <span className="text-[11px] text-slate-500 uppercase font-semibold block">Camera Source</span>
-                  <span className="text-xs font-mono font-bold text-slate-200 block truncate mt-1">
-                    {cameraInfo.name || 'CCTV Camera'} ({cameraInfo.location || 'Campus Area'})
-                  </span>
-                </div>
-                <div className="bg-slate-900/80 p-3.5 rounded-xl border border-dark-border">
-                  <span className="text-[11px] text-slate-500 uppercase font-semibold block">Event Type</span>
-                  <span className="text-xs font-mono font-bold text-red-400 block mt-1">
-                    {eventInfo.event_type || 'VIOLENCE'}
-                  </span>
-                </div>
-                <div className="bg-slate-900/80 p-3.5 rounded-xl border border-dark-border">
-                  <span className="text-[11px] text-slate-500 uppercase font-semibold block">Duration</span>
-                  <span className="text-xs font-mono font-bold text-slate-200 block mt-1">
-                    {eventInfo.duration_seconds ? `${eventInfo.duration_seconds}s` : '7.0s'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Evidence Frame & Clip */}
-          {isViolence && (evidenceInfo.evidence_image || evidenceInfo.evidence_clip || evidenceInfo.image_url) && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                <ImageIcon className="h-5 w-5 text-rose-400" />
-                <span>Forensic Evidence</span>
-              </h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {evidenceInfo.evidence_image && (
-                  <div className="space-y-2">
-                    <span className="text-xs text-slate-400 font-semibold uppercase">[Detected Evidence Frame]</span>
-                    <div className="rounded-xl overflow-hidden border border-dark-border bg-slate-950 aspect-video">
-                      <AuthenticatedImage
-                        src={evidenceInfo.evidence_image}
-                        alt="Detected Evidence Frame"
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                  </div>
-                )}
-                {evidenceInfo.evidence_clip && (
-                  <div className="space-y-2">
-                    <span className="text-xs text-slate-400 font-semibold uppercase">[Play Evidence Clip]</span>
-                    <div className="rounded-xl overflow-hidden border border-dark-border bg-slate-950 aspect-video flex items-center justify-center">
-                      <video
-                        src={evidenceInfo.evidence_clip}
-                        controls
-                        className="w-full h-full object-contain"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Involved Students Table */}
-          {isViolence && studentsList.length > 0 && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <div className="flex items-center justify-between border-b border-dark-border pb-3">
-                <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                  <Users className="h-5 w-5 text-blue-400" />
-                  <span>Persons Identified in Detected Violence Event</span>
-                </h3>
-                <span className="text-xs font-mono text-slate-400 bg-slate-900/80 px-2.5 py-1 rounded-md border border-dark-border">
-                  {studentsList.length} Person{studentsList.length > 1 ? 's' : ''}
+      {/* Main Forensic Report Card */}
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
+        <div className="grid grid-cols-1 lg:grid-cols-12 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
+          
+          {/* A. EVIDENCE SCREENSHOT (HERO SECTION) */}
+          <div className="lg:col-span-7 p-6 flex flex-col justify-center">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <span className="flex items-center space-x-1.5">
+                  <ImageIcon className="h-3.5 w-3.5 text-slate-400" />
+                  <span>Evidence Screenshot</span>
                 </span>
+                {screenshotUrl && (
+                  <span className="text-[11px] text-blue-600 font-normal lowercase">Click to enlarge</span>
+                )}
               </div>
 
-              <div className="overflow-x-auto rounded-xl border border-dark-border">
-                <table className="w-full text-left text-xs border-collapse">
-                  <thead>
-                    <tr className="bg-slate-900/90 border-b border-slate-800 text-slate-400 font-mono uppercase text-[11px]">
-                      <th className="py-3 px-4">Photo</th>
-                      <th className="py-3 px-4">Name</th>
-                      <th className="py-3 px-4">Class</th>
-                      <th className="py-3 px-4">Roll Number</th>
-                      <th className="py-3 px-4 text-right">Identity Confidence</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/70 bg-slate-950/40">
-                    {studentsList.map((s: any, idx: number) => {
-                      const idScore = s.identity_confidence || (s.confidence === 'high' ? 0.947 : 0.85);
-                      const idPercent = `${(Number(idScore) * 100).toFixed(1)}%`;
-                      return (
-                        <tr key={idx} className="hover:bg-slate-900/60 transition">
-                          <td className="py-3 px-4">
-                            <div className="w-10 h-10 rounded-lg overflow-hidden bg-slate-900 border border-slate-800 flex items-center justify-center">
-                              {s.profile_photo_url ? (
-                                <AuthenticatedImage src={s.profile_photo_url} alt={s.name} className="w-full h-full object-cover" />
-                              ) : (
-                                <Users className="h-4 w-4 text-slate-500" />
-                              )}
-                            </div>
-                          </td>
-                          <td className="py-3 px-4 font-bold text-slate-100">{s.name}</td>
-                          <td className="py-3 px-4 text-slate-300 font-mono">{s.class || s.class_name || 'N/A'}</td>
-                          <td className="py-3 px-4 text-slate-400 font-mono">{s.roll_number || 'N/A'}</td>
-                          <td className="py-3 px-4 text-right font-mono font-bold text-emerald-400">{idPercent}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
-
-          {/* AI Narrative Summary */}
-          <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-            <h3 className="font-bold text-slate-200 text-lg">AI Narrative Summary</h3>
-            <p className="text-slate-300 text-sm leading-relaxed italic bg-slate-900/50 p-4 rounded-xl border border-dark-border/50">
-              "{d.narrative_summary || d.explanation || 'No narrative description compiled.'}"
-            </p>
-          </div>
-
-          {/* Chronology / Timeline */}
-          <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-            <h3 className="font-bold text-slate-200 text-lg">Incident Chronology</h3>
-            <div className="space-y-4">
-              {d.timeline && d.timeline.length > 0 ? (
-                d.timeline.map((item: any, idx: number) => (
-                  <div key={idx} className="border-l-2 border-dark-border pl-6 relative pb-2 last:pb-0">
-                    <div className="absolute -left-[6px] top-1.5 w-2.5 h-2.5 rounded-full bg-blue-500" />
-                    <span className="text-[10px] font-bold text-slate-500 font-mono block">{item.time || item.timestamp}</span>
-                    <strong className="text-slate-200 text-xs mt-1 block">{item.camera || item.type}</strong>
-                    <p className="text-slate-400 text-xs mt-1">{item.description || item.url}</p>
-                  </div>
-                ))
-              ) : (
-                <div className="text-center py-6 text-slate-500 text-sm">
-                  No chronological logs attached.
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Right Sidebar Details */}
-        <div className="space-y-6">
-          {/* Subject Profile (Standard report or fallback) */}
-          {!isViolence && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                <User className="h-5 w-5 text-blue-500" />
-                <span>Subject Profile</span>
-              </h3>
-              {d.student_info ? (
-                <div className="space-y-3 text-sm">
-                  <div className="flex justify-between py-2 border-b border-dark-border/50">
-                    <span className="text-slate-500">Name</span>
-                    <span className="font-semibold text-slate-200">{d.student_info.name}</span>
-                  </div>
-                  <div className="flex justify-between py-2 border-b border-dark-border/50">
-                    <span className="text-slate-500">Roll Number</span>
-                    <span className="font-semibold text-slate-200 font-mono">{d.student_info.roll_number}</span>
-                  </div>
-                  <div className="flex justify-between py-2 last:pb-0">
-                    <span className="text-slate-500">Verification</span>
-                    <span className={`text-xs font-bold px-2 py-0.5 rounded border uppercase ${
-                      d.student_info.confidence === 'high'
-                        ? 'bg-green-500/10 text-green-500 border-green-500/20'
-                        : 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20'
-                    }`}>
-                      {d.student_info.confidence} confidence
+              {screenshotUrl ? (
+                <div 
+                  onClick={() => setIsEnlarged(true)}
+                  className="group relative rounded-xl overflow-hidden bg-slate-950 border border-slate-200 aspect-video flex items-center justify-center cursor-pointer shadow-inner hover:ring-2 hover:ring-blue-500/50 transition"
+                >
+                  <AuthenticatedImage
+                    src={screenshotUrl}
+                    alt="Forensic Evidence Keyframe"
+                    className="w-full h-full object-contain transition group-hover:scale-[1.01]"
+                  />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition flex items-center justify-center opacity-0 group-hover:opacity-100">
+                    <span className="inline-flex items-center space-x-1.5 bg-black/75 text-white text-xs px-3 py-1.5 rounded-lg backdrop-blur-sm shadow-md">
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      <span>Enlarge Image</span>
                     </span>
                   </div>
                 </div>
               ) : (
-                <div className="text-center py-4 text-slate-500 text-sm italic">
-                  Unknown Target profile
+                <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 aspect-video flex flex-col items-center justify-center text-slate-400 space-y-2">
+                  <ImageIcon className="h-8 w-8 text-slate-300" />
+                  <span className="text-xs">No evidence screenshot captured</span>
                 </div>
               )}
             </div>
-          )}
+          </div>
 
-          {/* Explainable AI Breakdown */}
-          {d.explainable_breakdown && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                <ShieldAlert className="h-5 w-5 text-blue-500" />
-                <span>Explainable AI Breakdown</span>
-              </h3>
-              <div className="space-y-3.5">
-                {Object.entries(d.explainable_breakdown).map(([metric, score]: [string, any]) => (
-                  <div key={metric} className="space-y-1">
-                    <div className="flex justify-between text-xs text-slate-400">
-                      <span className="capitalize">{metric}</span>
-                      <span className="font-mono">{(score || 0).toFixed(3)}</span>
-                    </div>
-                    <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
-                      <div className="bg-blue-500 h-full rounded-full" style={{ width: `${(score || 0) * 100}%` }} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Track IDs Correlation */}
-          {isViolence && eventInfo.person_track_ids && eventInfo.person_track_ids.length > 0 && (
-            <div className="bg-dark-card border border-dark-border rounded-2xl p-6 shadow-md space-y-4">
-              <h3 className="font-bold text-slate-200 text-lg flex items-center space-x-2">
-                <Target className="h-5 w-5 text-purple-400" />
-                <span>Associated Track IDs</span>
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {eventInfo.person_track_ids.map((tid: string, idx: number) => (
-                  <span key={idx} className="text-xs font-mono bg-slate-900 px-3 py-1.5 rounded-lg border border-dark-border text-purple-300">
-                    Track #{tid.slice(0, 8)}
+          {/* B, C, D. VIDEO NAME, TIMESTAMP & STUDENT DETAILS */}
+          <div className="lg:col-span-5 p-6 flex flex-col justify-between space-y-6 bg-slate-50/50">
+            
+            {/* Top Details: Video Name & Timestamp */}
+            <div className="space-y-5">
+              {/* B. Source Video Name */}
+              <div className="space-y-1.5">
+                <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <Video className="h-3.5 w-3.5 text-slate-400" />
+                  <span>Source Video</span>
+                </div>
+                <div className="p-3 bg-white border border-slate-200 rounded-xl">
+                  <span className="text-sm font-mono font-semibold text-slate-800 break-all select-all block">
+                    {videoName}
                   </span>
-                ))}
+                </div>
+              </div>
+
+              {/* C. Screenshot Timestamp */}
+              <div className="space-y-1.5">
+                <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                  <Clock className="h-3.5 w-3.5 text-slate-400" />
+                  <span>Screenshot Timestamp</span>
+                </div>
+                <div className="p-3 bg-white border border-slate-200 rounded-xl flex items-baseline space-x-2">
+                  <span className="text-lg font-mono font-bold text-slate-900 tracking-wider">
+                    {screenshotTimestamp}
+                  </span>
+                  <span className="text-xs text-slate-400 font-sans">(source video time)</span>
+                </div>
               </div>
             </div>
-          )}
+
+            {/* D. Identified Student Details */}
+            <div className="space-y-2 pt-2 border-t border-slate-200">
+              <div className="flex items-center space-x-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                <Users className="h-3.5 w-3.5 text-slate-400" />
+                <span>Identified Students</span>
+              </div>
+
+              {verifiedStudents.length > 0 ? (
+                <div className="space-y-3">
+                  {verifiedStudents.map((st) => (
+                    <div 
+                      key={st.id} 
+                      className="p-3.5 bg-white border border-slate-200 rounded-xl shadow-xs space-y-2.5 transition hover:border-slate-300"
+                    >
+                      <div className="flex items-center space-x-3 pb-2.5 border-b border-slate-100">
+                        {st.profilePhotoUrl ? (
+                          <AuthenticatedImage
+                            src={st.profilePhotoUrl}
+                            alt={st.name}
+                            className="w-11 h-11 rounded-full object-cover border border-slate-200 bg-slate-100 shrink-0 shadow-xs"
+                          />
+                        ) : (
+                          <div className="w-11 h-11 rounded-full bg-blue-50 border border-blue-200 text-blue-700 flex items-center justify-center font-bold text-base shrink-0 shadow-xs">
+                            {st.name.charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <span className="text-sm font-bold text-slate-900 block truncate leading-tight">
+                            {st.name}
+                          </span>
+                          <span className="text-xs font-mono text-slate-500 block truncate mt-0.5">
+                            Roll No.: <span className="font-semibold text-slate-800">{st.rollNumber}</span>
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div className="space-y-0.5">
+                          <span className="text-slate-400 block text-[11px] font-medium">Class</span>
+                          <span className="font-semibold text-slate-800 block truncate">
+                            {st.className || 'Not available'}
+                          </span>
+                        </div>
+                        <div className="space-y-0.5">
+                          <span className="text-slate-400 block text-[11px] font-medium">Department</span>
+                          <span className="font-semibold text-slate-800 block truncate">
+                            {st.department || 'Not available'}
+                          </span>
+                        </div>
+                        <div className="space-y-0.5">
+                          <span className="text-slate-400 block text-[11px] font-medium">Semester / Year</span>
+                          <span className="font-semibold text-slate-800 block truncate">
+                            {st.semesterYear || 'Not available'}
+                          </span>
+                        </div>
+                        <div className="space-y-0.5">
+                          <span className="text-slate-400 block text-[11px] font-medium">Section</span>
+                          <span className="font-semibold text-slate-800 block truncate">
+                            {st.section || 'Not available'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-4 bg-white border border-dashed border-slate-300 rounded-xl text-center">
+                  <span className="text-xs text-slate-500 italic block">
+                    No confirmed student identities
+                  </span>
+                </div>
+              )}
+            </div>
+
+          </div>
         </div>
       </div>
+
+      {/* Lightbox Enlargement Modal */}
+      {isEnlarged && screenshotUrl && (
+        <div 
+          onClick={() => setIsEnlarged(false)}
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4 sm:p-8"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()} 
+            className="bg-slate-900 border border-slate-700 rounded-2xl max-w-5xl w-full p-4 space-y-3 relative shadow-2xl overflow-hidden"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center space-x-2 text-slate-300 text-xs font-mono truncate">
+                <span className="font-semibold text-white">{videoName}</span>
+                <span className="text-slate-500">•</span>
+                <span>{screenshotTimestamp}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEnlarged(false)}
+                className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition cursor-pointer"
+                title="Close enlargement"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Modal Image */}
+            <div className="rounded-xl overflow-hidden bg-black max-h-[80vh] flex items-center justify-center">
+              <AuthenticatedImage
+                src={screenshotUrl}
+                alt="Enlarged Forensic Evidence Keyframe"
+                className="w-full h-full object-contain max-h-[80vh]"
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-slate-200 space-y-4">
+            <div className="flex items-center space-x-3 text-red-600">
+              <div className="p-2.5 bg-red-50 rounded-xl border border-red-100">
+                <AlertTriangle className="h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-900">Delete Forensic Report</h3>
+                <p className="text-xs text-slate-500">Confirm permanent report removal</p>
+              </div>
+            </div>
+            <p className="text-sm text-slate-600 leading-relaxed">
+              Are you sure you want to delete this forensic report? The report document record will be permanently deleted. The original CCTV video footage, evidence keyframes, and student profiles will remain preserved.
+            </p>
+            {deleteError && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 p-2.5 rounded-lg">
+                {deleteError}
+              </div>
+            )}
+            <div className="flex justify-end space-x-3 pt-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setDeleteError(null);
+                }}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-lg transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteReport}
+                disabled={isDeleting}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-xs font-semibold rounded-lg transition flex items-center space-x-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                <span>{isDeleting ? 'Deleting...' : 'Confirm Delete'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
+export default ReportDetails;

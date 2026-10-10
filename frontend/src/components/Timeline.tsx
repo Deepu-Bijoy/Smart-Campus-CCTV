@@ -35,27 +35,27 @@ export const Timeline: React.FC<TimelineProps> = ({ items }) => {
   };
 
   return (
-    <div className="relative border-l border-dark-border ml-4 pl-8 space-y-8 py-4">
+    <div className="relative border-l border-slate-200 ml-4 pl-8 space-y-8 py-4">
       {items.map((item) => (
         <div key={item.id} className="relative">
-          <span className="absolute -left-[45px] top-1 bg-dark-card border border-dark-border rounded-full p-2 shadow-md">
+          <span className="absolute -left-[45px] top-1 bg-white border border-slate-200 rounded-full p-2 shadow-sm">
             {getIcon(item.event_type)}
           </span>
-          <div className="bg-dark-card border border-dark-border rounded-xl p-5 shadow-lg">
+          <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold text-slate-200">{item.label}</h3>
-              <span className="flex items-center text-xs text-slate-400 space-x-1">
+              <h3 className="font-semibold text-slate-900">{item.label}</h3>
+              <span className="flex items-center text-xs text-slate-500 space-x-1">
                 <Calendar className="h-3 w-3" />
                 <span>{new Date(item.timestamp).toLocaleString()}</span>
               </span>
             </div>
-            <p className="text-sm text-slate-400 mb-3">{item.description}</p>
+            <p className="text-sm text-slate-600 mb-3">{item.description}</p>
             {item.metadata && Object.keys(item.metadata).length > 0 && (
-              <div className="bg-slate-900/50 rounded-lg p-3 text-xs space-y-1 border border-dark-border/50">
+              <div className="bg-slate-50 rounded-lg p-3 text-xs space-y-1 border border-slate-200">
                 {Object.entries(item.metadata).map(([key, val]) => (
                   <div key={key} className="flex justify-between">
                     <span className="text-slate-500 font-medium capitalize">{key.replace('_', ' ')}</span>
-                    <span className="text-slate-300 font-mono">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span>
+                    <span className="text-slate-800 font-mono">{typeof val === 'object' ? JSON.stringify(val) : String(val)}</span>
                   </div>
                 ))}
               </div>

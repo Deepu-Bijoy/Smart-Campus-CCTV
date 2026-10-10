@@ -32,7 +32,7 @@ class IncidentInvestigationQueryEngine:
         matched_type = None
         if any(w in query_lower for w in ["jump", "wall", "fence", "gate", "boundary", "cross"]):
             matched_type = "Boundary Crossing"
-        elif any(w in query_lower for w in ["fight", "clash", "altercation", "beat", "arguing", "violence", "fighting"]):
+        elif any(w in query_lower for w in ["fight", "clash", "altercation", "beat", "arguing", "violence", "fighting", "brawl", "physical altercation"]):
             matched_type = "Fight"
         elif any(w in query_lower for w in ["restricted", "enter", "area", "inside", "intrusion"]):
             matched_type = "Restricted Area Entry"
@@ -41,14 +41,17 @@ class IncidentInvestigationQueryEngine:
 
         # 2. Query Incidents from Database
         stmt = select(Incident).options(
-            selectinload(Incident.persons).selectinload(IncidentPerson.student),
+            selectinload(Incident.persons).selectinload(IncidentPerson.student).selectinload(Student.photos),
             selectinload(Incident.evidences),
             selectinload(Incident.events)
         )
 
         if matched_type:
             logger.info(f"Query routed to incident type: '{matched_type}'")
-            stmt = stmt.filter(Incident.incident_type.in_([matched_type, matched_type.lower().replace(" ", "_")]))
+            if matched_type == "Fight":
+                stmt = stmt.filter(Incident.incident_type.in_(["Fight", "fight", "Violence", "violence", "physical_altercation"]))
+            else:
+                stmt = stmt.filter(Incident.incident_type.in_([matched_type, matched_type.lower().replace(" ", "_")]))
         else:
             logger.info("No specific incident type matched. Performing explanation text-match.")
             stmt = stmt.filter(Incident.explanation.ilike(f"%{query_str}%"))
@@ -65,9 +68,41 @@ class IncidentInvestigationQueryEngine:
         res = await db.execute(stmt)
         incidents = res.scalars().all()
 
-        output = []
+        grouped = {}
         for inc in incidents:
-            output.append(await IncidentInvestigationQueryEngine._format_incident_dossier(db, inc, matched_type))
+            dossier = await IncidentInvestigationQueryEngine._format_incident_dossier(db, inc, matched_type)
+            vid = dossier.get("source_video")
+            cam = dossier.get("camera", {}).get("name") if isinstance(dossier.get("camera"), dict) else str(dossier.get("camera") or "")
+            start = dossier.get("detected_at") or "unknown"
+            itype = dossier.get("incident_type") or "unknown"
+
+            base_key = (cam, start, itype)
+            full_key = (vid, cam, start, itype)
+
+            matched_key = None
+            if vid is None:
+                for k in grouped.keys():
+                    if (k[1], k[2], k[3]) == base_key:
+                        matched_key = k
+                        break
+            else:
+                orphan_key = (None, cam, start, itype)
+                if orphan_key in grouped:
+                    del grouped[orphan_key]
+                matched_key = full_key
+
+            if matched_key and matched_key in grouped:
+                existing = grouped[matched_key]
+                if not existing.get("source_video") and dossier.get("source_video"):
+                    grouped[matched_key] = dossier
+                elif len(dossier.get("persons", [])) > len(existing.get("persons", [])):
+                    grouped[matched_key] = dossier
+                elif dossier.get("confidence", {}).get("event_confidence", 0) > existing.get("confidence", {}).get("event_confidence", 0):
+                    grouped[matched_key] = dossier
+            else:
+                grouped[full_key] = dossier
+
+        output = list(grouped.values())
 
         # 3. Dynamic Real-Time Incident Fallback Search if SQL DB returns 0 incidents
         if not output:
@@ -80,6 +115,8 @@ class IncidentInvestigationQueryEngine:
 
     @staticmethod
     async def _format_incident_dossier(db: AsyncSession, inc: Incident, matched_type: Optional[str] = None) -> Dict[str, Any]:
+        from app.api.v1.events import _extract_video_timing, _build_student_academic_detail
+
         cam_stmt = select(Camera).filter(Camera.id == inc.camera_id)
         cam_res = await db.execute(cam_stmt)
         camera = cam_res.scalars().first()
@@ -88,35 +125,77 @@ class IncidentInvestigationQueryEngine:
         camera_loc = camera.location if camera else "Campus Area"
 
         severity = "Low"
-        if inc.incident_type in ["Fight", "Boundary Crossing", "Restricted Area Entry"]:
+        if inc.incident_type in ["Fight", "Violence", "Boundary Crossing", "Restricted Area Entry"]:
             severity = "High"
         elif inc.incident_type == "Suspicious Activity":
             severity = "Medium"
 
+        # Resolve associated Video object
+        video_obj = None
+        if inc.events:
+            for ev_item in inc.events:
+                if ev_item.video_id:
+                    v_res = await db.execute(select(Video).filter(Video.id == ev_item.video_id))
+                    video_obj = v_res.scalars().first()
+                    if video_obj:
+                        break
+
+        if not video_obj:
+            de_stmt = select(DetectedEvent).filter(DetectedEvent.incident_id == inc.id)
+            de_res = await db.execute(de_stmt)
+            for de in de_res.scalars().all():
+                if de.video_id:
+                    v_res = await db.execute(select(Video).filter(Video.id == de.video_id))
+                    video_obj = v_res.scalars().first()
+                    if video_obj:
+                        break
+
+        if not video_obj and inc.evidences:
+            import re
+            for ev in inc.evidences:
+                fp = getattr(ev, "file_path", "") or ""
+                uuid_match = re.search(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', fp, re.I)
+                if uuid_match:
+                    try:
+                        v_uuid = uuid.UUID(uuid_match.group(1))
+                        v_res = await db.execute(select(Video).filter(Video.id == v_uuid))
+                        video_obj = v_res.scalars().first()
+                        if video_obj:
+                            break
+                    except ValueError:
+                        pass
+                short_match = re.search(r'x3d_([0-9a-f]{8})_', fp, re.I)
+                if short_match:
+                    prefix = short_match.group(1)
+                    v_res = await db.execute(select(Video).filter(Video.filename.like(f"%{prefix}%")))
+                    video_obj = v_res.scalars().first()
+                    if video_obj:
+                        break
+
+        source_video = (video_obj.original_filename or video_obj.filename) if video_obj else None
+
+        # Extract authoritative video-relative timing
+        det_str, int_str, mid_s, start_s, end_s = _extract_video_timing(inc.explanation, inc.evidences, video_obj)
+        from app.api.v1.events import _format_video_timestamp
+        start_time_str = _format_video_timestamp(start_s, preserve_millis=False) if start_s is not None else det_str
+
         persons_list = []
         face_confidence = 0.0
-        
+        seen_student_ids = set()
+
         if inc.persons:
             for ip in inc.persons:
                 student = ip.student
-                if student:
+                if student and student.id not in seen_student_ids:
+                    seen_student_ids.add(student.id)
                     if ip.confidence > face_confidence:
                         face_confidence = ip.confidence
-                    persons_list.append({
-                        "identity_status": "Identified",
-                        "name": student.name,
-                        "class_name": f"{student.programme} {student.section}",
-                        "roll_number": student.university_roll_number,
-                        "department": student.department
-                    })
+                    s_dict = _build_student_academic_detail(student)
+                    s_dict["identity_status"] = "Identified"
+                    s_dict["confidence"] = ip.confidence
+                    persons_list.append(s_dict)
 
-        primary_person = persons_list[0] if persons_list else {
-            "identity_status": "Unknown Person",
-            "name": "Unknown Person",
-            "class_name": "N/A",
-            "roll_number": "N/A",
-            "department": "N/A"
-        }
+        primary_person = persons_list[0] if persons_list else None
 
         video_evidence = None
         video_evidence_id = None
@@ -126,11 +205,13 @@ class IncidentInvestigationQueryEngine:
             file_url = ev.file_path.replace("\\", "/")
             if "storage/" in file_url:
                 file_url = "/" + file_url[file_url.find("storage/"):]
+            elif not file_url.startswith("/"):
+                file_url = "/" + file_url
                 
-            if ev.evidence_type == "video":
+            if ev.evidence_type == "video" and not video_evidence:
                 video_evidence = file_url
                 video_evidence_id = str(ev.id)
-            elif ev.evidence_type == "screenshot":
+            elif ev.evidence_type == "screenshot" and not screenshot_evidence:
                 screenshot_evidence = file_url
                 screenshot_evidence_id = str(ev.id)
 
@@ -142,12 +223,20 @@ class IncidentInvestigationQueryEngine:
 
         return {
             "id": str(inc.id),
+            "incident_id": str(inc.id),
             "incident_type": inc.incident_type,
             "severity": severity,
+            "source_video": source_video,
+            "video_id": str(video_obj.id) if video_obj else None,
             "camera": {
+                "id": str(camera.id) if camera else None,
                 "name": camera_name,
                 "location": camera_loc
             },
+            "detected_at": start_time_str or "Timestamp unavailable",
+            "start_time": start_time_str or "Timestamp unavailable",
+            "keyframe_timestamp": det_str,
+            "incident_interval": int_str,
             "timestamp": {
                 "date": date_str,
                 "time": time_str

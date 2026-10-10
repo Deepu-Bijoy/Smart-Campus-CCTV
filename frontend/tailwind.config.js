@@ -8,9 +8,9 @@ export default {
     extend: {
       colors: {
         dark: {
-          bg: '#0B0F19',     // Deep space slate
-          card: '#161F30',   // Darker card background
-          border: '#24334C'  // Slate accent borders
+          bg: '#F7F9FC',     // Modern light page background
+          card: '#FFFFFF',   // Pure white card background
+          border: '#E5E7EB'  // Crisp light border
         }
       }
     },

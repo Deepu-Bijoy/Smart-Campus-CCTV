@@ -82,38 +82,60 @@ class StudentIdentifier:
             print(f"Student IDs returned: {student_ids_returned}")
             print()
             
-            # Match decision logic
-            highest_similarity = similarity_scores[0] if similarity_scores else 0.0
             best_match = results[0] if results else None
             student_id = best_match.payload.get("student_id") if best_match else None
-            
+            highest_similarity = similarity_scores[0] if similarity_scores else 0.0
+
+            # Fallback to database student face embeddings if Qdrant returned no matches
+            if not best_match:
+                try:
+                    import json
+                    from app.db.session import SessionLocal
+                    from sqlalchemy import text
+                    async with SessionLocal() as db_session:
+                        db_res = await db_session.execute(text("SELECT student_id, embedding FROM student_face_embeddings"))
+                        rows = db_res.fetchall()
+                        best_db_sim = 0.0
+                        best_db_sid = None
+                        for sid, raw_emb in rows:
+                            if not raw_emb:
+                                continue
+                            db_vec = np.array(json.loads(raw_emb) if isinstance(raw_emb, str) else raw_emb, dtype=np.float32)
+                            norm = np.linalg.norm(db_vec)
+                            if norm > 0:
+                                db_vec = db_vec / norm
+                            sim = float(np.dot(embedding, db_vec))
+                            if sim > best_db_sim:
+                                best_db_sim = sim
+                                best_db_sid = sid
+                        if best_db_sid:
+                            highest_similarity = best_db_sim
+                            student_id = best_db_sid
+                            print(f"[RECOGNITION FALLBACK] DB fallback matched student {student_id} with similarity {highest_similarity:.4f}")
+                except Exception as dbe:
+                    logger.warning(f"[RECOGNITION FALLBACK] DB query fallback error: {dbe}")
+
             print("========== MATCH ==========")
             print(f"Recognition threshold: {settings.RECOGNITION_MEDIUM_THRESHOLD}")
             print(f"Highest similarity: {highest_similarity:.4f}")
             
-            if not best_match:
-                print("Accepted or rejected: Rejected")
-                print("Reason: Qdrant returned no matches.")
-                print()
-                return None
-                
-            if highest_similarity >= settings.RECOGNITION_MEDIUM_THRESHOLD:
-                confidence = "high" if highest_similarity >= settings.RECOGNITION_HIGH_THRESHOLD else "medium"
-                print("Accepted or rejected: Accepted")
-                print(f"Reason: Similarity score {highest_similarity:.4f} is above or equal to threshold {settings.RECOGNITION_MEDIUM_THRESHOLD}")
-                print()
-                return {
-                    "success": True,
-                    "student_id": uuid.UUID(student_id) if isinstance(student_id, str) else student_id,
-                    "similarity_score": highest_similarity,
-                    "confidence": confidence
-                }
-            else:
+            if not student_id or highest_similarity < settings.RECOGNITION_MEDIUM_THRESHOLD:
                 print("Accepted or rejected: Rejected")
                 print(f"Reason: Highest similarity {highest_similarity:.4f} is below configured recognition threshold {settings.RECOGNITION_MEDIUM_THRESHOLD}")
                 print()
                 return None
                 
+            confidence = "high" if highest_similarity >= settings.RECOGNITION_HIGH_THRESHOLD else "medium"
+            print("Accepted or rejected: Accepted")
+            print(f"Reason: Similarity score {highest_similarity:.4f} is above or equal to threshold {settings.RECOGNITION_MEDIUM_THRESHOLD}")
+            print()
+            return {
+                "success": True,
+                "student_id": uuid.UUID(str(student_id)),
+                "similarity_score": highest_similarity,
+                "confidence": confidence
+            }
+                
         except Exception as e:
-            logger.error(f"[RECOGNITION AUDIT] Qdrant student face matching query failed: {str(e)}")
+            logger.error(f"[RECOGNITION AUDIT] Student face matching query failed: {str(e)}")
             return None

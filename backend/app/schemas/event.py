@@ -18,6 +18,12 @@ class EventResponse(BaseModel):
     camera_name: Optional[str] = None
     camera_location: Optional[str] = None
     video_id: Optional[uuid.UUID] = None
+    video_name: Optional[str] = None
+    video_timestamp: Optional[str] = None
+    video_timestamp_interval: Optional[str] = None
+    video_timestamp_seconds: Optional[float] = None
+    video_start_seconds: Optional[float] = None
+    video_end_seconds: Optional[float] = None
     timestamp: datetime
     zone_id: Optional[uuid.UUID] = None
     student_id: Optional[uuid.UUID] = None

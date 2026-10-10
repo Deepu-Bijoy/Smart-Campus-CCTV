@@ -3,11 +3,14 @@ import re
 import uuid
 import time
 import logging
+import json
+import numpy as np
 from datetime import datetime, timezone, timedelta
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Dict, Tuple
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import func, text
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
@@ -28,6 +31,9 @@ from app.pipeline.x3d_violence_detector import X3DViolenceDetector
 from app.pipeline.detector import YOLOv8Detector
 from app.pipeline.tracker import ByteTrackTracker
 from app.services.student_identifier import StudentIdentifier
+from app.pipeline.face_engine import FaceEnrollmentEngine
+from starlette.concurrency import run_in_threadpool
+import gc
 from app.event_engine.event_engine import EventDetectionEngine
 import cv2
 from app.schemas.violence import (
@@ -222,6 +228,151 @@ async def upload_violence_video(
         uploaded_at=video.created_at
     )
 
+def _track_video_segments_sync(
+    video_file_path: str,
+    video_id: uuid.UUID,
+    segments: List[Any],
+    video_duration: Optional[float] = None
+) -> Tuple[Dict[int, Dict[str, Any]], float, float]:
+    """
+    CPU-bound synchronous tracking and crop extraction worker.
+    Executes in a separate threadpool worker to prevent blocking the FastAPI asyncio event loop.
+    """
+    yolo_detector = YOLOv8Detector()
+    yolo_detector.target_classes = [0]  # Dedicated person detection for violence altercation tracking
+    tracker = ByteTrackTracker()
+    face_engine = FaceEnrollmentEngine()
+
+    cap = cv2.VideoCapture(video_file_path)
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
+    if fps <= 0:
+        fps = 25.0
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = video_duration or (total_frames / fps if fps > 0 else 0.0)
+
+    min_seg_start = min(max(0.0, s.start_time) for s in segments)
+    max_seg_end = max(min(duration, s.end_time) if duration > 0 else s.end_time for s in segments)
+    start_tracking_sec = max(0.0, min_seg_start - 2.5)
+    end_tracking_sec = min(duration, max_seg_end + 3.0) if duration > 0 else (max_seg_end + 3.0)
+
+    start_tracking_frame = max(0, int(start_tracking_sec * fps))
+    end_tracking_frame = min(total_frames - 1, int(end_tracking_sec * fps)) if total_frames > 0 else int(end_tracking_sec * fps)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_tracking_frame)
+    current_frame_idx = start_tracking_frame
+
+    all_video_tracks: Dict[int, Dict[str, Any]] = {}
+    t_yolo_start = time.time()
+    t_bytetrack_total = 0.0
+
+    crop_dir = os.path.join(settings.STORAGE_DIR, "crops", str(video_id))
+    os.makedirs(crop_dir, exist_ok=True)
+
+    from app.tasks.video_tasks import is_video_cancelled
+    while current_frame_idx <= end_tracking_frame:
+        if current_frame_idx % 15 == 0 and is_video_cancelled(video_id):
+            logger.info(f"[VIOLENCE PIPELINE] Video {video_id} cancelled during tracking. Halting.")
+            break
+
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+
+        t_sec = current_frame_idx / fps
+
+        t_bt_start = time.time()
+        track_result = tracker.track_frame(yolo_detector, frame, persist=True)
+        t_bytetrack_total += (time.time() - t_bt_start)
+
+        if track_result is not None and track_result.boxes is not None:
+            boxes = track_result.boxes
+            for box in boxes:
+                cls_id = int(box.cls[0].item())
+                if cls_id != 0:  # Class 0: person
+                    continue
+
+                conf = float(box.conf[0].item())
+                xyxy = box.xyxy[0].cpu().numpy().tolist()
+                tracker_id = int(box.id[0].item()) if box.id is not None else current_frame_idx
+
+                h, w = frame.shape[:2]
+                x1, y1, x2, y2 = map(int, xyxy)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+                crop_w = x2 - x1
+                crop_h = y2 - y1
+
+                if tracker_id not in all_video_tracks:
+                    all_video_tracks[tracker_id] = {
+                        "detections": [],
+                        "candidate_face_crops": [],
+                        "best_crop_path": None,
+                        "best_face_score": 0.0,
+                        "best_conf": 0.0,
+                        "start_time": t_sec,
+                        "end_time": t_sec,
+                        "last_face_frame": -100
+                    }
+
+                trk_entry = all_video_tracks[tracker_id]
+                trk_entry["end_time"] = t_sec
+                trk_entry["detections"].append({
+                    "frame_number": current_frame_idx,
+                    "timestamp_seconds": round(t_sec, 2),
+                    "bounding_box": [round(c, 1) for c in xyxy],
+                    "confidence": round(conf, 4)
+                })
+
+                crop = frame[y1:y2, x1:x2] if (crop_w >= 40 and crop_h >= 50) else None
+                if crop is not None:
+                    # Multi-crop face candidate evaluation:
+                    # Check every 2 frames to capture transient direct-to-camera face angles during altercation scrimmages
+                    if (current_frame_idx - trk_entry.get("last_face_frame", -100)) >= 2 and face_engine.model is not None:
+                        trk_entry["last_face_frame"] = current_frame_idx
+                        try:
+                            faces = face_engine.model.get(crop)
+                            if faces:
+                                best_f = max(faces, key=lambda f: f.det_score)
+                                if best_f.det_score >= 0.50:
+                                    fx1, fy1, fx2, fy2 = map(int, best_f.bbox)
+                                    ch, cw = crop.shape[:2]
+                                    pad_w = int((fx2 - fx1) * 0.25)
+                                    pad_h = int((fy2 - fy1) * 0.25)
+                                    face_x1 = max(0, fx1 - pad_w)
+                                    face_y1 = max(0, fy1 - pad_h)
+                                    face_x2 = min(cw, fx2 + pad_w)
+                                    face_y2 = min(ch, fy2 + pad_h)
+                                    face_crop = crop[face_y1:face_y2, face_x1:face_x2] if (face_x2 > face_x1 and face_y2 > face_y1) else crop
+
+                                    cand_filename = f"crop_trk_{tracker_id}_f{current_frame_idx}.jpg"
+                                    cand_path = os.path.join(crop_dir, cand_filename)
+                                    cv2.imwrite(cand_path, face_crop)
+
+                                    emb_vec = best_f.normed_embedding.tolist() if hasattr(best_f, "normed_embedding") and best_f.normed_embedding is not None else None
+                                    trk_entry["candidate_face_crops"].append({
+                                        "det_score": float(best_f.det_score),
+                                        "path": cand_path,
+                                        "frame": current_frame_idx,
+                                        "embedding": emb_vec
+                                    })
+                                    if float(best_f.det_score) > trk_entry["best_face_score"]:
+                                        trk_entry["best_face_score"] = float(best_f.det_score)
+                                        trk_entry["best_crop_path"] = cand_path
+                        except Exception as c_err:
+                            logger.debug(f"Face extraction error on crop: {c_err}")
+
+                    if not trk_entry["best_crop_path"] and conf > trk_entry["best_conf"]:
+                        trk_entry["best_conf"] = conf
+                        fb_path = os.path.join(crop_dir, f"crop_trk_{tracker_id}_f{current_frame_idx}.jpg")
+                        cv2.imwrite(fb_path, crop)
+                        trk_entry["best_crop_path"] = fb_path
+
+        current_frame_idx += 1
+
+    t_yolo_total = time.time() - t_yolo_start
+    cap.release()
+    return all_video_tracks, t_yolo_total, t_bytetrack_total
+
 @router.post("/analyze", response_model=ViolenceAnalysisResponse, status_code=status.HTTP_200_OK)
 async def analyze_video_for_violence(
     file: Optional[UploadFile] = File(None),
@@ -246,7 +397,7 @@ async def analyze_video_for_violence(
 
     # 1. Resolve or Create Video Record
     target_video: Optional[Video] = None
-    if file:
+    if file and hasattr(file, "filename") and file.filename:
         os.makedirs(settings.STORAGE_DIR, exist_ok=True)
         original_filename = os.path.basename(file.filename or "unknown_cctv.mp4")
         file_extension = os.path.splitext(original_filename)[1].lower()
@@ -374,10 +525,13 @@ async def analyze_video_for_violence(
     t_evidence_total = 0.0
     t_db_total = 0.0
 
+    now_utc = datetime.now(timezone.utc)
     target_video.status = "processing"
     target_video.current_stage = "X3D-M Temporal Violence Detection"
     target_video.progress_percentage = 30
+    target_video.processing_started_at = now_utc
     await db.commit()
+    run_id = now_utc.strftime("%Y%m%d%H%M%S")
 
     try:
         # Step 1: Run Pretrained X3D-M Video Temporal Model
@@ -385,7 +539,8 @@ async def analyze_video_for_violence(
         x3d_detector = X3DViolenceDetector()
         t_x3d_load = time.time() - t_x3d_load_start
 
-        x3d_res = x3d_detector.detect_violence(
+        x3d_res = await run_in_threadpool(
+            x3d_detector.detect_violence,
             target_video.file_path,
             window_duration_sec=2.0,
             stride_sec=1.0,
@@ -414,146 +569,199 @@ async def analyze_video_for_violence(
             return await _compile_violence_dossier(db, target_video, resolved_camera)
 
         # Step 2: Violence Detected — Process ONLY detected violence segments downstream
+        # Clean up any prior violence analysis records for this video to ensure idempotency on re-analysis
+        vid_str = str(target_video.id)
+        det_events_res = await db.execute(
+            select(DetectedEvent.incident_id).filter(
+                DetectedEvent.video_id == target_video.id,
+                DetectedEvent.incident_id.isnot(None)
+            ).distinct()
+        )
+        cand_incident_ids = [r[0] for r in det_events_res.fetchall()]
+        for inc_id in cand_incident_ids:
+            other_refs = (await db.execute(
+                select(func.count(DetectedEvent.id)).filter(
+                    DetectedEvent.incident_id == inc_id,
+                    DetectedEvent.video_id != target_video.id
+                )
+            )).scalar() or 0
+            if other_refs == 0:
+                i_str = str(inc_id)
+                await db.execute(text("DELETE FROM evidences WHERE incident_id = :iid").bindparams(iid=i_str))
+                await db.execute(text("DELETE FROM incident_persons WHERE incident_id = :iid").bindparams(iid=i_str))
+                await db.execute(text("DELETE FROM incidents WHERE id = :iid").bindparams(iid=i_str))
+
+        await db.execute(
+            text("DELETE FROM event_tracks WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid)").bindparams(vid=vid_str)
+        )
+        await db.execute(
+            text("DELETE FROM student_recognition_events WHERE video_id = :vid").bindparams(vid=vid_str)
+        )
+        await db.execute(
+            text("DELETE FROM person_reids WHERE video_id = :vid").bindparams(vid=vid_str)
+        )
+        await db.execute(
+            text("DELETE FROM detections WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid)").bindparams(vid=vid_str)
+        )
+        await db.execute(
+            text("DELETE FROM tracks WHERE video_id = :vid").bindparams(vid=vid_str)
+        )
+        await db.execute(
+            text("DELETE FROM detected_events WHERE video_id = :vid").bindparams(vid=vid_str)
+        )
+        await db.commit()
+
         target_video.current_stage = "Processing Violence Segments (YOLOv8 & ByteTrack)"
         target_video.progress_percentage = 60
         await db.commit()
 
-        yolo_detector = YOLOv8Detector()
-        tracker = ByteTrackTracker()
-        identifier = StudentIdentifier()
+        video_duration = target_video.duration or 0.0
 
-        cap = cv2.VideoCapture(target_video.file_path)
-        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
-        if fps <= 0:
-            fps = 25.0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        video_duration = target_video.duration or (total_frames / fps if fps > 0 else 0.0)
+        # Run frame tracking & crop extraction in threadpool worker so FastAPI event loop remains unblocked
+        all_video_tracks, t_yolo_step, t_bt_step = await run_in_threadpool(
+            _track_video_segments_sync,
+            target_video.file_path,
+            target_video.id,
+            x3d_res.segments,
+            video_duration
+        )
+        t_yolo_total += t_yolo_step
+        t_bytetrack_total += t_bt_step
 
-        # Track-level identity cache to avoid redundant ArcFace calls
-        track_identity_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+        from app.tasks.video_tasks import is_video_cancelled
+        if is_video_cancelled(target_video.id):
+            logger.info(f"[VIOLENCE PIPELINE] Video {target_video.id} was cancelled during frame tracking. Halting.")
+            return None
+
+        # Step 2b: Filter out transient micro-tracks (< 4 detections or < 0.20s duration),
+        # but ALWAYS keep tracks that have valid candidate face observations!
+        valid_video_tracks = {
+            tid: trk for tid, trk in all_video_tracks.items()
+            if (len(trk["detections"]) >= 4 and (trk["end_time"] - trk["start_time"]) >= 0.20)
+            or len(trk.get("candidate_face_crops", [])) > 0
+        }
+        if not valid_video_tracks:
+            valid_video_tracks = all_video_tracks
+
+        # Step 2c: Biometric Student Identification on Candidate Crops
+        t_arc_start = time.time()
+        track_identity_cache: Dict[int, List[Dict[str, Any]]] = {}
+
+        # Pre-load enrolled student embeddings from database for fast and robust vector comparison
+        enrolled_db_embeddings: List[Tuple[uuid.UUID, np.ndarray]] = []
+        try:
+            db_emb_res = await db.execute(text("SELECT student_id, embedding FROM student_face_embeddings"))
+            for sid_val, raw_emb in db_emb_res.fetchall():
+                if not raw_emb:
+                    continue
+                v_arr = np.array(json.loads(raw_emb) if isinstance(raw_emb, str) else raw_emb, dtype=np.float32)
+                v_norm = np.linalg.norm(v_arr)
+                if v_norm > 0:
+                    v_arr = v_arr / v_norm
+                enrolled_db_embeddings.append((uuid.UUID(str(sid_val)), v_arr))
+        except Exception as lde:
+            logger.warning(f"[VIOLENCE PIPELINE] Could not preload enrolled embeddings from DB: {lde}")
+
+        # Preload Student records to eliminate redundant SELECT queries during candidate evaluation
+        all_std_res = await db.execute(select(Student))
+        enrolled_students_map: Dict[uuid.UUID, Student] = {s.id: s for s in all_std_res.scalars().all()}
+
+        for trk_id, trk_data in valid_video_tracks.items():
+            candidate_list = trk_data.get("candidate_face_crops", [])
+            matched_by_student: Dict[uuid.UUID, Dict[str, Any]] = {}
+
+            if not candidate_list and trk_data.get("best_crop_path") and os.path.exists(trk_data["best_crop_path"]):
+                candidate_list = [{"path": trk_data["best_crop_path"], "embedding": None}]
+
+            for cand in candidate_list:
+                cand_path = cand.get("path")
+                cand_emb = cand.get("embedding")
+                sim = 0.0
+                best_sid = None
+
+                # 1. Direct cosine similarity matching using precomputed normalized embedding
+                if cand_emb and enrolled_db_embeddings:
+                    emb_arr = np.array(cand_emb, dtype=np.float32)
+                    e_norm = np.linalg.norm(emb_arr)
+                    if e_norm > 0:
+                        emb_arr = emb_arr / e_norm
+                    for sid, db_vec in enrolled_db_embeddings:
+                        s_sim = float(np.dot(emb_arr, db_vec))
+                        if s_sim > sim:
+                            sim = s_sim
+                            best_sid = sid
+                elif cand_path and os.path.exists(cand_path):
+                    # 2. Fallback to StudentIdentifier if no precomputed embedding
+                    try:
+                        match_res = await identifier.identify_face_in_crop(cand_path)
+                        if match_res and match_res.get("success") and match_res.get("student_id"):
+                            m_sim = match_res.get("similarity_score", 0.0)
+                            if m_sim > sim:
+                                sim = m_sim
+                                best_sid = match_res["student_id"]
+                    except Exception as fe:
+                        logger.warning(f"[VIOLENCE PIPELINE] StudentIdentifier fallback error for track {trk_id}: {fe}")
+
+                # Aggregate valid observation if >= recognition threshold
+                if best_sid and sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
+                    if best_sid not in matched_by_student or sim > matched_by_student[best_sid]["similarity_score"]:
+                        student_obj = enrolled_students_map.get(best_sid)
+                        if not student_obj:
+                            s_stmt = select(Student).filter(Student.id == best_sid)
+                            s_res = await db.execute(s_stmt)
+                            student_obj = s_res.scalars().first()
+                            if student_obj:
+                                enrolled_students_map[best_sid] = student_obj
+                        if student_obj:
+                            matched_by_student[best_sid] = {
+                                "student": student_obj,
+                                "similarity_score": sim,
+                                "confidence": "high" if sim >= settings.RECOGNITION_HIGH_THRESHOLD else "medium",
+                                "matched_crop_path": cand_path
+                            }
+
+            matched_list = list(matched_by_student.values())
+            if matched_list:
+                best_match = max(matched_list, key=lambda m: m["similarity_score"])
+                if best_match.get("matched_crop_path"):
+                    trk_data["best_crop_path"] = best_match["matched_crop_path"]
+
+            track_identity_cache[trk_id] = matched_list
+
+        t_arcface_total += (time.time() - t_arc_start)
+
+        if is_video_cancelled(target_video.id):
+            logger.info(f"[VIOLENCE PIPELINE] Video {target_video.id} was cancelled before persistence. Rolling back.")
+            await db.rollback()
+            return None
+
+        v_check = await db.execute(select(Video.id).filter(Video.id == target_video.id))
+        if not v_check.scalar():
+            logger.info(f"[VIOLENCE PIPELINE] Video {target_video.id} no longer exists in DB. Rolling back.")
+            await db.rollback()
+            return None
+
+        # Step 2d: Evidence Generation and Persistence for Each Segment
+        persisted_tracks_map: Dict[int, uuid.UUID] = {}
 
         for seg_idx, seg in enumerate(x3d_res.segments):
             seg_start_sec = max(0.0, seg.start_time)
             seg_end_sec = min(video_duration, seg.end_time) if video_duration > 0 else seg.end_time
-            start_frame_idx = int(seg_start_sec * fps)
-            end_frame_idx = int(seg_end_sec * fps)
 
-            logger.info(
-                f"[VIOLENCE PIPELINE] Processing segment {seg_idx + 1}/{len(x3d_res.segments)}: "
-                f"{seg_start_sec:.2f}s to {seg_end_sec:.2f}s (frames {start_frame_idx}-{end_frame_idx})"
-            )
-
-            # 2a. Run YOLOv8 + ByteTrack only on the segment frames
-            t_yolo_start = time.time()
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame_idx)
-            current_frame_idx = start_frame_idx
-
-            segment_tracks: Dict[int, Dict[str, Any]] = {}
-
-            while current_frame_idx <= end_frame_idx:
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
-
-                t_sec = current_frame_idx / fps
-
-                t_bt_start = time.time()
-                track_result = tracker.track_frame(yolo_detector, frame, persist=True)
-                t_bytetrack_total += (time.time() - t_bt_start)
-
-                if track_result is not None and track_result.boxes is not None:
-                    boxes = track_result.boxes
-                    for box in boxes:
-                        cls_id = int(box.cls[0].item())
-                        if cls_id != 0:  # Class 0: person
-                            continue
-
-                        conf = float(box.conf[0].item())
-                        xyxy = box.xyxy[0].cpu().numpy().tolist()
-                        tracker_id = int(box.id[0].item()) if box.id is not None else current_frame_idx
-
-                        # Crop person box
-                        h, w = frame.shape[:2]
-                        x1, y1, x2, y2 = map(int, xyxy)
-                        x1, y1 = max(0, x1), max(0, y1)
-                        x2, y2 = min(w, x2), min(h, y2)
-                        crop = frame[y1:y2, x1:x2] if (x2 > x1 and y2 > y1) else None
-
-                        if tracker_id not in segment_tracks:
-                            segment_tracks[tracker_id] = {
-                                "detections": [],
-                                "best_crop_path": None,
-                                "best_conf": 0.0,
-                                "start_time": t_sec,
-                                "end_time": t_sec,
-                            }
-
-                        trk_entry = segment_tracks[tracker_id]
-                        trk_entry["end_time"] = t_sec
-                        trk_entry["detections"].append({
-                            "frame_number": current_frame_idx,
-                            "timestamp_seconds": round(t_sec, 2),
-                            "bounding_box": [round(c, 1) for c in xyxy],
-                            "confidence": round(conf, 4)
-                        })
-
-                        # Save best crop for ArcFace biometric recognition
-                        if crop is not None and conf > trk_entry["best_conf"] and crop.shape[0] >= 40 and crop.shape[1] >= 20:
-                            trk_entry["best_conf"] = conf
-                            crop_filename = f"crop_seg_{seg_idx}_trk_{tracker_id}_{current_frame_idx}.jpg"
-                            crop_dir = os.path.join(settings.STORAGE_DIR, "crops")
-                            os.makedirs(crop_dir, exist_ok=True)
-                            crop_path = os.path.join(crop_dir, crop_filename)
-                            cv2.imwrite(crop_path, crop)
-                            trk_entry["best_crop_path"] = crop_path
-
-                current_frame_idx += 1
-
-            t_yolo_total += (time.time() - t_yolo_start)
-
-            # 2b. ArcFace Student Identification (only on segment tracks, with caching)
-            t_arc_start = time.time()
-            for trk_id, trk_data in segment_tracks.items():
-                if trk_id not in track_identity_cache:
-                    matched_identity = None
-                    crop_p = trk_data.get("best_crop_path")
-                    if crop_p and os.path.exists(crop_p):
-                        try:
-                            match_res = await identifier.identify_face_in_crop(crop_p)
-                            if match_res and match_res.get("success") and match_res.get("student_id"):
-                                sim = match_res.get("similarity_score", 0.0)
-                                if sim >= 0.50:  # Safe threshold
-                                    s_stmt = select(Student).filter(Student.id == match_res["student_id"])
-                                    s_res = await db.execute(s_stmt)
-                                    student_obj = s_res.scalars().first()
-                                    if student_obj:
-                                        matched_identity = {
-                                            "student": student_obj,
-                                            "similarity_score": sim,
-                                            "confidence": match_res.get("confidence", "high"),
-                                        }
-                        except Exception as fe:
-                            logger.warning(f"[VIOLENCE PIPELINE] ArcFace matching error for track {trk_id}: {fe}")
-
-                    track_identity_cache[trk_id] = matched_identity
-
-            t_arcface_total += (time.time() - t_arc_start)
-
-            # 2c. Evidence Generation
+            # Evidence Generation
             t_ev_start = time.time()
             os.makedirs(os.path.join(settings.STORAGE_DIR, "evidence"), exist_ok=True)
-
             mid_sec = (seg_start_sec + seg_end_sec) / 2.0
             frame_filename = f"evidence_frame_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.jpg"
             frame_path = os.path.join(settings.STORAGE_DIR, "evidence", frame_filename)
-            extract_evidence_frame(target_video.file_path, mid_sec, frame_path)
+            await run_in_threadpool(extract_evidence_frame, target_video.file_path, mid_sec, frame_path)
 
             clip_filename = f"clip_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.mp4"
             clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
-            generate_subclip(target_video.file_path, seg_start_sec, seg.duration, clip_path)
+            await run_in_threadpool(generate_subclip, target_video.file_path, seg_start_sec, seg.duration, clip_path)
             t_evidence_total += (time.time() - t_ev_start)
 
-            # 2d. Database Persistence
+            # Database Persistence
             t_db_start = time.time()
             incident_id = uuid.uuid4()
             inc_obj = Incident(
@@ -598,45 +806,77 @@ async def analyze_video_for_violence(
                     timestamp=datetime.now(timezone.utc)
                 ))
 
-            for trk_id, trk_data in segment_tracks.items():
-                t_uuid = uuid.uuid4()
-                id_info = track_identity_cache.get(trk_id)
-                matched_sid = id_info["student"].id if id_info else None
+            # Associate tracks active within this segment window (with 1.5s tolerance)
+            seg_tracks = {
+                tid: trk for tid, trk in valid_video_tracks.items()
+                if not (trk["end_time"] < (seg_start_sec - 1.5) or trk["start_time"] > (seg_end_sec + 1.5))
+            }
+            if not seg_tracks:
+                seg_tracks = {
+                    tid: trk for tid, trk in valid_video_tracks.items()
+                    if tid in track_identity_cache and len(track_identity_cache[tid]) > 0
+                }
 
-                db_track = Track(
-                    id=t_uuid,
-                    video_id=target_video.id,
-                    object_class="person",
-                    tracker_id=trk_id,
-                    start_time=trk_data["start_time"],
-                    end_time=trk_data["end_time"],
-                    identified_student_id=matched_sid,
-                    key_frame_path=trk_data.get("best_crop_path")
-                )
-                db.add(db_track)
+            added_incident_students = set()
+            for trk_id, trk_data in seg_tracks.items():
+                id_infos = track_identity_cache.get(trk_id, [])
+                primary_sid = id_infos[0]["student"].id if id_infos else None
 
-                for d in trk_data["detections"]:
-                    db.add(Detection(
+                if trk_id not in persisted_tracks_map:
+                    t_uuid = uuid.uuid4()
+                    persisted_tracks_map[trk_id] = t_uuid
+
+                    db_track = Track(
+                        id=t_uuid,
+                        video_id=target_video.id,
+                        object_class="person",
+                        tracker_id=trk_id,
+                        start_time=trk_data["start_time"],
+                        end_time=trk_data["end_time"],
+                        identified_student_id=primary_sid,
+                        key_frame_path=trk_data.get("best_crop_path")
+                    )
+                    db.add(db_track)
+
+                    for d in trk_data["detections"]:
+                        db.add(Detection(
+                            id=uuid.uuid4(),
+                            track_id=t_uuid,
+                            frame_number=d["frame_number"],
+                            timestamp_seconds=d["timestamp_seconds"],
+                            bounding_box=d["bounding_box"],
+                            confidence=d["confidence"]
+                        ))
+
+                # Associate all matched students for this track with this segment incident
+                for id_info in id_infos:
+                    matched_sid = id_info["student"].id
+                    if matched_sid not in added_incident_students:
+                        added_incident_students.add(matched_sid)
+                        db.add(IncidentPerson(
+                            id=uuid.uuid4(),
+                            incident_id=incident_id,
+                            student_id=matched_sid,
+                            confidence=id_info["similarity_score"]
+                        ))
+
+                    # Persist student recognition event
+                    db.add(StudentRecognitionEvent(
                         id=uuid.uuid4(),
-                        track_id=t_uuid,
-                        frame_number=d["frame_number"],
-                        timestamp_seconds=d["timestamp_seconds"],
-                        bounding_box=d["bounding_box"],
-                        confidence=d["confidence"]
-                    ))
-
-                if id_info:
-                    db.add(IncidentPerson(
-                        id=uuid.uuid4(),
-                        incident_id=incident_id,
+                        track_id=persisted_tracks_map[trk_id],
                         student_id=matched_sid,
-                        confidence=id_info["similarity_score"]
+                        video_id=target_video.id,
+                        timestamp=datetime.now(timezone.utc),
+                        similarity_score=id_info["similarity_score"],
+                        confidence=id_info["confidence"],
+                        camera_id=str(resolved_camera.id) if resolved_camera else None
                     ))
 
             await db.commit()
             t_db_total += (time.time() - t_db_start)
 
-        cap.release()
+        # Cleanup memory
+        gc.collect()
 
         # Step 3: Complete timing instrumentation
         t_total = time.time() - t_total_start
@@ -652,24 +892,66 @@ async def analyze_video_for_violence(
         target_video.progress_percentage = 100
         await db.commit()
 
+        # Dispatch consolidated violence alert if segments were detected
+        if x3d_res.segments:
+            try:
+                from app.services.alert_dispatcher import AlertDispatcher
+                earliest_t = min(s.start_time for s in x3d_res.segments) if x3d_res.segments else 0.0
+                mins = int(earliest_t // 60)
+                secs = int(earliest_t % 60)
+                timestamp_str = f"{mins:02d}:{secs:02d}"
+                camera_name = resolved_camera.name if resolved_camera else "Surveillance Camera"
+                all_students = set()
+                for trk_id, id_infos in track_identity_cache.items():
+                    for id_info in id_infos:
+                        all_students.add(id_info["student"].id)
+
+                await AlertDispatcher.dispatch_violence_alert(
+                    db=db,
+                    video_id=target_video.id,
+                    video_filename=target_video.original_filename or target_video.filename or "CCTV Video",
+                    camera_name=camera_name,
+                    incident_count=len(x3d_res.segments),
+                    persons_identified_count=len(all_students),
+                    earliest_timestamp_str=timestamp_str,
+                    run_id=run_id
+                )
+            except Exception as ex:
+                logger.warning(f"[VIOLENCE PIPELINE] Could not dispatch violence alert: {ex}")
+
         return await _compile_violence_dossier(db, target_video, resolved_camera)
     except Exception as exc:
+        from app.tasks.video_tasks import is_video_cancelled
+        if is_video_cancelled(target_video.id):
+            logger.info(f"[VIOLENCE PIPELINE] Suppressed error for video {target_video.id} because it was deleted/cancelled.")
+            return None
+
         logger.error(f'[VIOLENCE PIPELINE] Analysis failed for video {target_video.id}: {str(exc)}', exc_info=True)
         try:
             await db.rollback()
         except Exception:
             pass
+
+        # Persist failed status reliably using an independent DB session
+        from app.db.session import SessionLocal
         try:
-            target_video.status = 'failed'
-            target_video.current_stage = 'Analysis Failed'
-            target_video.error_message = f'Violence detection failed: {str(exc)}'[:1024]
-            target_video.processing_finished_at = datetime.now(timezone.utc)
-            db.add(target_video)
-            await db.commit()
+            async with SessionLocal() as err_db:
+                v_res = await err_db.execute(select(Video).filter(Video.id == target_video.id))
+                err_video = v_res.scalars().first()
+                if err_video:
+                    err_video.status = 'failed'
+                    err_video.current_stage = 'Analysis Failed'
+                    err_video.error_message = f'Violence detection failed: {str(exc)}'[:1024]
+                    err_video.processing_finished_at = datetime.now(timezone.utc)
+                    await err_db.commit()
+                    logger.info(f'[VIOLENCE PIPELINE] Successfully persisted failed status for video {target_video.id}')
         except Exception as db_err:
             logger.error(f'[VIOLENCE PIPELINE] Failed to persist failed video status: {db_err}')
-            await db.rollback()
-        raise
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f'Violence detection analysis failed: {str(exc)}'
+        )
 
 async def _compile_violence_dossier(
     db: AsyncSession,
@@ -790,26 +1072,41 @@ async def _compile_violence_dossier(
 
         # Parse involved students for this segment
         seg_students: List[InvolvedStudentCard] = []
+        seg_seen_student_ids = set()
         for ip in inc.persons:
             student = ip.student
             if not student and ip.student_id:
                 s_res = await db.execute(select(Student).filter(Student.id == ip.student_id))
                 student = s_res.scalars().first()
 
-            if student:
+            if student and student.id not in seg_seen_student_ids:
+                seg_seen_student_ids.add(student.id)
                 photo_url = await _get_student_profile_photo_url(db, student.id)
+                # Retrieve the track associated with this student's recognition
+                rec_stmt = (
+                    select(StudentRecognitionEvent.track_id)
+                    .filter(
+                        StudentRecognitionEvent.video_id == target_video.id,
+                        StudentRecognitionEvent.student_id == student.id
+                    )
+                    .order_by(StudentRecognitionEvent.similarity_score.desc())
+                )
+                rec_tr = (await db.execute(rec_stmt)).scalars().first()
+
                 card = InvolvedStudentCard(
                     student_id=student.id,
                     name=student.name,
                     roll_number=student.university_roll_number,
                     department=student.department,
                     programme=student.programme,
+                    year=student.year,
+                    semester=student.semester,
                     section=student.section,
                     class_name=f"{student.programme} {student.section}",
                     profile_photo_url=photo_url,
                     similarity_score=round(ip.confidence, 2),
                     confidence="high" if ip.confidence >= settings.RECOGNITION_HIGH_THRESHOLD else "medium",
-                    track_id=str(det_event.track_id) if det_event and det_event.track_id else None,
+                    track_id=str(rec_tr) if rec_tr else (str(det_event.track_id) if det_event and det_event.track_id else None),
                     event_id=str(det_event.id) if det_event else str(inc.id),
                     is_identified=True
                 )
@@ -890,6 +1187,33 @@ async def _compile_violence_dossier(
         trk_res = await db.execute(trk_stmt)
         all_video_tracks = trk_res.scalars().all()
 
+        # Calculate true unique physical individuals (peak concurrent valid tracks) in this segment
+        window_tracks = [
+            trk for trk in all_video_tracks
+            if not (trk.end_time < start_t or trk.start_time > end_t)
+            and (trk.end_time - trk.start_time >= 0.15 or (trk.detections and len(trk.detections) >= 3))
+        ]
+
+        peak_concurrent_persons = 0
+        if window_tracks:
+            import numpy as np
+            time_samples = np.arange(start_t, end_t + 0.1, 0.25)
+            for ts in time_samples:
+                c_active = sum(1 for trk in window_tracks if trk.start_time <= ts <= trk.end_time)
+                if c_active > peak_concurrent_persons:
+                    peak_concurrent_persons = c_active
+            if peak_concurrent_persons == 0:
+                peak_concurrent_persons = min(len(window_tracks), 2)
+        elif all_video_tracks:
+            # Fallback if window filtering is strict
+            peak_concurrent_persons = 2
+
+        # Shared face engines for dossier compilation
+        from app.pipeline.face_engine import FaceEnrollmentEngine
+        from app.services.student_identifier import StudentIdentifier
+        fe_dossier = FaceEnrollmentEngine()
+        identifier_dossier = StudentIdentifier()
+
         for trk in all_video_tracks:
             in_window = not (trk.end_time < start_t or trk.start_time > end_t)
             is_linked = trk.id in associated_track_ids
@@ -909,42 +1233,14 @@ async def _compile_violence_dossier(
                     if reid_obj and reid_obj.crop_path:
                         crop_url = _clean_storage_url(reid_obj.crop_path)
 
-                if not crop_url and rep_det and target_video.file_path and os.path.exists(target_video.file_path):
-                    try:
-                        cap = cv2.VideoCapture(target_video.file_path)
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, int(rep_det.frame_number))
-                        ret, f_img = cap.read()
-                        cap.release()
-                        if ret and f_img is not None:
-                            h, w = f_img.shape[:2]
-                            bx1, by1, bx2, by2 = rep_det.bounding_box
-                            cx1 = max(0, min(w - 1, int(round(bx1))))
-                            cy1 = max(0, min(h - 1, int(round(by1))))
-                            cx2 = max(cx1 + 1, min(w, int(round(bx2))))
-                            cy2 = max(cy1 + 1, min(h, int(round(by2))))
-                            c_img = f_img[cy1:cy2, cx1:cx2]
-                            if c_img.size > 0:
-                                crops_dir = os.path.join(settings.STORAGE_DIR, "crops", str(target_video.id))
-                                os.makedirs(crops_dir, exist_ok=True)
-                                c_path = os.path.join(crops_dir, f"{trk.tracker_id}_{rep_det.frame_number}.jpg")
-                                cv2.imwrite(c_path, c_img)
-                                trk.key_frame_path = c_path
-                                crop_url = _clean_storage_url(c_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to generate on-demand crop for track {trk.id}: {str(e)}")
-
                 face_visible = False
                 disk_crop_path = trk.key_frame_path
                 if disk_crop_path and os.path.exists(disk_crop_path):
                     try:
-                        from app.pipeline.face_engine import FaceEnrollmentEngine
-                        fe = FaceEnrollmentEngine()
-                        if fe.model is not None:
+                        if fe_dossier.model is not None:
                             c_mat = cv2.imread(disk_crop_path)
                             if c_mat is not None:
-                                ch, cw = c_mat.shape[:2]
-                                upper_crop = c_mat[:max(20, int(ch * 0.55)), :] if ch > 30 else c_mat
-                                faces = fe.model.get(upper_crop)
+                                faces = fe_dossier.model.get(c_mat)
                                 face_visible = len(faces) > 0
                     except Exception:
                         face_visible = False
@@ -978,15 +1274,13 @@ async def _compile_violence_dossier(
                         sim_score = rec_obj.similarity_score
                         id_confidence = rec_obj.confidence or ("high" if sim_score >= settings.RECOGNITION_HIGH_THRESHOLD else "medium")
                     else:
-                        sim_score = 0.85
+                        sim_score = 0.70
                         id_confidence = "high"
 
                 # 3. If not yet identified and crop exists, run StudentIdentifier
                 if not matched_student and disk_crop_path and os.path.exists(disk_crop_path):
                     try:
-                        from app.services.student_identifier import StudentIdentifier
-                        identifier = StudentIdentifier()
-                        match_res = await identifier.identify_face_in_crop(disk_crop_path)
+                        match_res = await identifier_dossier.identify_face_in_crop(disk_crop_path)
                         if match_res and match_res.get("success") and match_res.get("student_id"):
                             found_id = match_res["student_id"]
                             sim_score = match_res["similarity_score"]
@@ -1010,7 +1304,7 @@ async def _compile_violence_dossier(
                     except Exception as ie:
                         logger.warning(f"Student identification attempt failed for track {trk.id}: {str(ie)}")
 
-                # 4. Construct student card (either identified or Unidentified Person)
+                # 4. Construct student card (only add confirmed matches to seg_students)
                 if matched_student:
                     photo_url = await _get_student_profile_photo_url(db, matched_student.id)
                     student_card = InvolvedStudentCard(
@@ -1019,6 +1313,8 @@ async def _compile_violence_dossier(
                         roll_number=matched_student.university_roll_number,
                         department=matched_student.department,
                         programme=matched_student.programme,
+                        year=matched_student.year,
+                        semester=matched_student.semester,
                         section=matched_student.section,
                         class_name=f"{matched_student.programme} {matched_student.section}",
                         profile_photo_url=photo_url,
@@ -1047,13 +1343,14 @@ async def _compile_violence_dossier(
                             confidence=sim_score
                         ))
                 else:
-                    # Do NOT force every detected person to match a student.
                     student_card = InvolvedStudentCard(
                         student_id=None,
                         name="Unidentified Person",
                         roll_number="N/A",
                         department=None,
                         programme=None,
+                        year=None,
+                        semester=None,
                         section=None,
                         class_name="Unknown Class",
                         profile_photo_url=None,
@@ -1063,8 +1360,6 @@ async def _compile_violence_dossier(
                         event_id=str(det_event.id) if det_event else str(inc.id),
                         is_identified=False
                     )
-                    if not any(s.track_id == str(trk.id) for s in seg_students):
-                        seg_students.append(student_card)
 
                 seg_tracks.append(SegmentTrackInfo(
                     event_id=str(det_event.id) if det_event else str(inc.id),
@@ -1093,6 +1388,7 @@ async def _compile_violence_dossier(
             explanation=inc.explanation or f"Detected physical fight/altercation at {start_t:.1f}s.",
             evidence_image=seg_image,
             evidence_video=seg_video,
+            persons_count=peak_concurrent_persons,
             students=seg_students,
             tracks=seg_tracks
         ))

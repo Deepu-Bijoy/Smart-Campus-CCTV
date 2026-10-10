@@ -15,7 +15,6 @@ import { ReportDetails } from './pages/ReportDetails';
 import { UploadFeed } from './pages/Upload';
 import { Students } from './pages/Students';
 import { StudentDetails } from './pages/StudentDetails';
-import { BulkImport } from './pages/BulkImport';
 import { Search } from './pages/Search';
 import { TimelinePage } from './pages/TimelinePage';
 import { Settings } from './pages/Settings';
@@ -28,6 +27,8 @@ const queryClient = new QueryClient({
     queries: {
       refetchOnWindowFocus: false,
       retry: 1,
+      staleTime: 30000,
+      gcTime: 5 * 60 * 1000,
     },
   },
 });
@@ -65,7 +66,7 @@ const AdminRoute: React.FC<AdminRouteProps> = ({ children }) => {
 
 const Layout: React.FC = () => {
   return (
-    <div className="flex bg-dark-bg min-h-screen text-slate-100 font-sans">
+    <div className="flex bg-[#F7F9FC] min-h-screen text-slate-900 font-sans">
       <Sidebar />
       <div className="flex-1 flex flex-col min-h-screen">
         <Navbar />
@@ -82,7 +83,6 @@ const Layout: React.FC = () => {
             <Route path="/reports/:id" element={<ReportDetails />} />
             <Route path="/upload" element={<UploadFeed />} />
             <Route path="/students" element={<Students />} />
-            <Route path="/students/import" element={<BulkImport />} />
             <Route path="/students/:id" element={<StudentDetails />} />
             <Route path="/search" element={<Search />} />
             <Route path="/timeline/:id" element={<TimelinePage />} />
