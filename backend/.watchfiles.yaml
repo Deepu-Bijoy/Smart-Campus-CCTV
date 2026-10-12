@@ -1,0 +1,16 @@
+# WatchFiles configuration for AI-Powered Smart CCTV Investigation System
+# Excludes test suites, storage directories, temporary databases, and logs
+# from triggering server reloads during video analysis.
+ignore:
+  - tests/.*
+  - storage/.*
+  - scratch/.*
+  - \.pytest_cache/.*
+  - .*\.db$
+  - .*\.sqlite$
+  - .*\.sqlite3$
+  - .*\.log$
+  - .*\.mp4$
+  - .*\.jpg$
+  - .*\.jpeg$
+  - .*\.png$

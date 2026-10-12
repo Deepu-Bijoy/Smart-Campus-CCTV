@@ -134,17 +134,22 @@ class Settings(BaseSettings):
     def _redis_available(self) -> bool:
         if self.CELERY_ALWAYS_EAGER_VAL:
             return False
-        if not hasattr(self, "_cached_redis_available"):
-            import socket
-            try:
-                socket.getaddrinfo(self.REDIS_HOST, self.REDIS_PORT)
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(0.2)
-                s.connect((self.REDIS_HOST, self.REDIS_PORT))
-                s.close()
-                self._cached_redis_available = True
-            except Exception:
-                self._cached_redis_available = False
+        import time
+        now = time.time()
+        if hasattr(self, "_last_redis_check") and (now - self._last_redis_check < 5.0):
+            return getattr(self, "_cached_redis_available", False)
+        
+        self._last_redis_check = now
+        import socket
+        try:
+            socket.getaddrinfo(self.REDIS_HOST, self.REDIS_PORT)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.3)
+            s.connect((self.REDIS_HOST, self.REDIS_PORT))
+            s.close()
+            self._cached_redis_available = True
+        except Exception:
+            self._cached_redis_available = False
         return self._cached_redis_available
 
     @property
@@ -196,6 +201,9 @@ class Settings(BaseSettings):
     
     @property
     def CELERY_ALWAYS_EAGER(self) -> bool:
+        import os
+        if os.getenv("TESTING") == "True" or os.getenv("CELERY_ALWAYS_EAGER", "").lower() == "true":
+            return True
         return self.CELERY_ALWAYS_EAGER_VAL or not self._redis_available
     
     @property
@@ -209,6 +217,9 @@ class Settings(BaseSettings):
     # Face Identification Thresholds
     RECOGNITION_HIGH_THRESHOLD: float = 0.75
     RECOGNITION_MEDIUM_THRESHOLD: float = 0.60
+    
+    # Upload Limits (500 MiB = 524,288,000 bytes)
+    MAX_UPLOAD_SIZE_BYTES: int = 524_288_000
     
     # Logging
     LOG_LEVEL: str = "INFO"

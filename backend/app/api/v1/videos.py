@@ -2,20 +2,39 @@ import os
 import uuid
 import logging
 from typing import Any, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Response, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import joinedload
 
 from app.api import deps
 from app.core.config import settings
 from app.models.user import User
 from app.models.video import Video
 from app.schemas.video import VideoResponse, VideoStatusResponse
-from app.services.video_metadata import extract_video_metadata
+from app.services.video_metadata import extract_video_metadata, check_video_integrity
 from app.tasks.video_tasks import process_video
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+def resolve_camera_id(camera_id_val: Any, camera_rel: Any = None) -> Optional[uuid.UUID]:
+    """
+    Safely resolve camera UUID from relationship or database column,
+    preventing Pydantic FieldInfo/Form descriptor strings or invalid data from leaking.
+    """
+    if camera_rel is not None and hasattr(camera_rel, "id") and isinstance(camera_rel.id, uuid.UUID):
+        return camera_rel.id
+    if isinstance(camera_id_val, uuid.UUID):
+        return camera_id_val
+    if isinstance(camera_id_val, str):
+        if "annotation=" in camera_id_val or "alias=" in camera_id_val or "FieldInfo" in camera_id_val or "required=" in camera_id_val:
+            return None
+        try:
+            return uuid.UUID(camera_id_val)
+        except (ValueError, TypeError, AttributeError):
+            return None
+    return None
 
 @router.post("/upload", response_model=VideoResponse, status_code=status.HTTP_201_CREATED)
 async def upload_video(
@@ -46,7 +65,7 @@ async def upload_video(
     
     try:
         total_size = 0
-        max_size = 100 * 1024 * 1024  # 100MB limit
+        max_size = settings.MAX_UPLOAD_SIZE_BYTES  # 500 MiB (524,288,000 bytes)
         with open(saved_path, "wb") as buffer:
             while chunk := await file.read(1024 * 1024):
                 total_size += len(chunk)
@@ -56,7 +75,7 @@ async def upload_video(
                         os.remove(saved_path)
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail="Video upload size exceeds 100MB limit."
+                        detail=f"Video upload size exceeds 500 MiB limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
                     )
                 buffer.write(chunk)
     except HTTPException:
@@ -69,7 +88,66 @@ async def upload_video(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to write file to local disk: {str(e)}"
         )
-        
+
+    # Validate non-empty content
+    if total_size == 0:
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded video file is empty (0 bytes)."
+        )
+
+    # Validate video stream integrity (detect corrupted or invalid containers)
+    is_valid, corruption_detail = check_video_integrity(saved_path)
+    if not is_valid:
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=corruption_detail or "Corrupted or unreadable video file."
+        )
+
+    # Deduplication check on client retry: if an active record already exists for identical upload within 120s
+    from datetime import datetime, timezone, timedelta
+    recent_cutoff = datetime.now(timezone.utc) - timedelta(seconds=120)
+    dup_stmt = select(Video).filter(
+        Video.uploaded_by == current_user.id,
+        Video.original_filename == original_filename,
+        Video.file_size == total_size,
+        Video.created_at >= recent_cutoff,
+        Video.status.in_(["queued", "processing", "completed"])
+    ).order_by(Video.created_at.desc())
+    dup_res = await db.execute(dup_stmt)
+    existing_video = dup_res.scalars().first()
+    if existing_video:
+        logger.info(f"Duplicate upload detected on retry for video {original_filename}. Returning existing record {existing_video.id}.")
+        if os.path.exists(saved_path):
+            os.remove(saved_path)
+        cam_id = resolve_camera_id(existing_video.camera_id, getattr(existing_video, "camera", None))
+        return VideoResponse(
+            id=existing_video.id,
+            title=existing_video.title,
+            filename=existing_video.filename,
+            original_filename=existing_video.original_filename,
+            file_path=existing_video.file_path,
+            status=existing_video.status,
+            duration=existing_video.duration,
+            width=existing_video.width,
+            height=existing_video.height,
+            fps=existing_video.fps,
+            codec=existing_video.codec,
+            file_size=existing_video.file_size,
+            current_stage=existing_video.current_stage,
+            progress_percentage=existing_video.progress_percentage,
+            processing_started_at=existing_video.processing_started_at,
+            processing_finished_at=existing_video.processing_finished_at,
+            error_message=existing_video.error_message,
+            camera_id=cam_id,
+            uploaded_by=existing_video.uploaded_by,
+            created_at=existing_video.created_at,
+        )
+
     try:
         metadata = extract_video_metadata(saved_path)
     except Exception as e:
@@ -99,7 +177,7 @@ async def upload_video(
         codec=metadata.get("codec"),
         file_size=metadata.get("file_size"),
         uploaded_by=current_user.id,
-        camera_id=camera_id
+        camera_id=resolve_camera_id(camera_id)
     )
     
     db.add(video)
@@ -122,31 +200,86 @@ async def upload_video(
         await db.commit()
         await db.refresh(video)
     
-    return video
+    return VideoResponse(
+        id=video.id,
+        title=video.title,
+        filename=video.filename,
+        original_filename=video.original_filename,
+        file_path=video.file_path,
+        status=video.status,
+        duration=video.duration,
+        width=video.width,
+        height=video.height,
+        fps=video.fps,
+        codec=video.codec,
+        file_size=video.file_size,
+        current_stage=video.current_stage,
+        progress_percentage=video.progress_percentage,
+        processing_started_at=video.processing_started_at,
+        processing_finished_at=video.processing_finished_at,
+        error_message=video.error_message,
+        camera_id=video.camera_id,
+        uploaded_by=video.uploaded_by,
+        created_at=video.created_at,
+    )
 
 @router.get("", response_model=List[VideoResponse])
 @router.get("/", response_model=List[VideoResponse])
 async def list_videos(
+    limit: Optional[int] = Query(None, ge=1),
+    offset: Optional[int] = Query(None, ge=0),
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
     role = getattr(current_user, "role", "").lower()
     is_staff = role in ["admin", "operator"]
-    if is_staff:
-        result = await db.execute(
-            select(Video).order_by(Video.created_at.desc())
-        )
-    else:
+    
+    stmt = select(Video).options(joinedload(Video.camera)).order_by(Video.created_at.desc())
+    if not is_staff:
         uid_str = str(current_user.id)
         uid_hex = current_user.id.hex if hasattr(current_user.id, "hex") else uid_str.replace("-", "")
-        result = await db.execute(
-            select(Video).filter(
-                (Video.uploaded_by == current_user.id) |
-                (Video.uploaded_by == uid_str) |
-                (Video.uploaded_by == uid_hex)
-            ).order_by(Video.created_at.desc())
+        stmt = stmt.filter(
+            (Video.uploaded_by == current_user.id) |
+            (Video.uploaded_by == uid_str) |
+            (Video.uploaded_by == uid_hex)
         )
-    return result.scalars().all()
+    
+    if limit is not None and limit > 0:
+        stmt = stmt.limit(limit)
+    if offset is not None and offset > 0:
+        stmt = stmt.offset(offset)
+
+    result = await db.execute(stmt)
+    videos = result.scalars().all()
+
+    response_items: List[VideoResponse] = []
+    for video in videos:
+        cam_id = resolve_camera_id(video.camera_id, getattr(video, "camera", None))
+        response_items.append(
+            VideoResponse(
+                id=video.id,
+                title=video.title,
+                filename=video.filename,
+                original_filename=video.original_filename,
+                file_path=video.file_path,
+                status=video.status,
+                duration=video.duration,
+                width=video.width,
+                height=video.height,
+                fps=video.fps,
+                codec=video.codec,
+                file_size=video.file_size,
+                current_stage=video.current_stage,
+                progress_percentage=video.progress_percentage,
+                processing_started_at=video.processing_started_at,
+                processing_finished_at=video.processing_finished_at,
+                error_message=video.error_message,
+                camera_id=cam_id,
+                uploaded_by=video.uploaded_by,
+                created_at=video.created_at,
+            )
+        )
+    return response_items
 
 @router.get("/{video_id}", response_model=VideoResponse)
 async def get_video(
@@ -157,7 +290,7 @@ async def get_video(
     vid_str = str(video_id)
     vid_hex = video_id.hex if hasattr(video_id, "hex") else vid_str.replace("-", "")
     result = await db.execute(
-        select(Video).filter(
+        select(Video).options(joinedload(Video.camera)).filter(
             (Video.id == video_id) | (Video.id == vid_str) | (Video.id == vid_hex)
         )
     )
@@ -177,7 +310,30 @@ async def get_video(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied"
         )
-    return video
+    
+    cam_id = resolve_camera_id(video.camera_id, getattr(video, "camera", None))
+    return VideoResponse(
+        id=video.id,
+        title=video.title,
+        filename=video.filename,
+        original_filename=video.original_filename,
+        file_path=video.file_path,
+        status=video.status,
+        duration=video.duration,
+        width=video.width,
+        height=video.height,
+        fps=video.fps,
+        codec=video.codec,
+        file_size=video.file_size,
+        current_stage=video.current_stage,
+        progress_percentage=video.progress_percentage,
+        processing_started_at=video.processing_started_at,
+        processing_finished_at=video.processing_finished_at,
+        error_message=video.error_message,
+        camera_id=cam_id,
+        uploaded_by=video.uploaded_by,
+        created_at=video.created_at,
+    )
 
 @router.get("/{video_id}/status", response_model=VideoStatusResponse)
 async def get_video_status(
@@ -267,23 +423,6 @@ async def delete_video(
         )
         events_count = e_count_res.scalar() or 0
         
-        qdrant_store = QdrantVectorStore()
-        try:
-            q_count = qdrant_store.client.count(
-                collection_name=qdrant_store.collection_name,
-                count_filter=qdrant_models.Filter(
-                    must=[
-                        qdrant_models.FieldCondition(
-                            key="video_id",
-                            match=qdrant_models.MatchValue(value=vid_str)
-                        )
-                    ]
-                ),
-                exact=True
-            )
-            deleted_vectors_count = q_count.count
-        except Exception:
-            deleted_vectors_count = 0
 
         # 2. Collect physical files to delete after database commit
         files_to_remove = set()
@@ -371,6 +510,7 @@ async def delete_video(
 
         # 5. Delete vectors from Qdrant
         try:
+            qdrant_store = QdrantVectorStore()
             qdrant_store.delete_vectors_by_video_id(video_id)
         except Exception as qe:
             logger.error(f"Failed to clean up Qdrant CCTV vectors for video {video_id}: {str(qe)}")
@@ -397,7 +537,7 @@ async def delete_video(
         if os.path.exists(v_frame_dir):
             shutil.rmtree(v_frame_dir, ignore_errors=True)
 
-        logger.info(f"Deleted video: video_id={video_id} Removed: Tracks: {tracks_count} Events: {events_count} Qdrant vectors: {deleted_vectors_count}")
+        logger.info(f"Deleted video: video_id={video_id} Removed: Tracks: {tracks_count} Events: {events_count}")
 
     except HTTPException:
         await db.rollback()

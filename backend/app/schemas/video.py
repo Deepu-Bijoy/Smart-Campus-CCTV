@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, ConfigDict
+from typing import Optional, Any
+from pydantic import BaseModel, ConfigDict, field_validator
 
 class VideoBase(BaseModel):
     title: Optional[str] = None
@@ -43,6 +43,24 @@ class VideoResponse(BaseModel):
     camera_id: Optional[uuid.UUID] = None
     uploaded_by: uuid.UUID
     created_at: datetime
+
+    @field_validator("camera_id", mode="before")
+    @classmethod
+    def validate_camera_id(cls, v: Any) -> Optional[uuid.UUID]:
+        if v is None:
+            return None
+        if isinstance(v, uuid.UUID):
+            return v
+        if isinstance(v, str):
+            if "annotation=" in v or "alias=" in v or "FieldInfo" in v or "required=" in v:
+                return None
+            try:
+                return uuid.UUID(v)
+            except (ValueError, TypeError, AttributeError):
+                return None
+        if hasattr(v, "id") and isinstance(v.id, uuid.UUID):
+            return v.id
+        return None
 
     model_config = ConfigDict(from_attributes=True)
 

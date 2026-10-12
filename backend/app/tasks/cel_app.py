@@ -6,11 +6,11 @@ from app.core.config import settings
 import os
 broker_url = settings.CELERY_BROKER_URL
 result_backend = settings.CELERY_RESULT_BACKEND
- 
+
 if settings.CELERY_ALWAYS_EAGER:
     broker_url = "memory://"
     result_backend = "cache+memory://"
- 
+
 celery_app = Celery(
     "tasks",
     broker=broker_url,
@@ -27,12 +27,16 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    broker_connection_retry_on_startup=True,
     task_routes={
         "app.tasks.video_tasks.process_video": {"queue": "gpu_queue"},
+        "app.tasks.bulk_tasks.bulk_enroll_faces_task": {"queue": "gpu_queue"},
         "app.tasks.cpu_tasks.*": {"queue": "cpu_queue"},
     },
 )
-print("CELERY ALWAYS EAGER CONFIGURED TO:", celery_app.conf.task_always_eager)
+print(f"CELERY CONFIG: broker={broker_url}, always_eager={celery_app.conf.task_always_eager}")
 
 @setup_logging.connect
 def config_loggers(*args, **kw):

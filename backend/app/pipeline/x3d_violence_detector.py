@@ -169,6 +169,8 @@ class X3DViolenceDetector:
 
             wrapper = wrapper.to(self.device).eval()
             self.model = wrapper
+            self.mean_t = torch.tensor(self.mean, dtype=torch.float32, device=self.device).view(1, 3, 1, 1, 1)
+            self.std_t = torch.tensor(self.std, dtype=torch.float32, device=self.device).view(1, 3, 1, 1, 1)
             load_time = time.time() - t_start
             logger.info(f"[X3D] Model loading completed successfully in {load_time:.3f} sec.")
 
@@ -208,9 +210,11 @@ class X3DViolenceDetector:
         stride_sec: float = 1.0,
         threshold: Optional[float] = None,
         context_margin_sec: float = 1.0,
+        batch_size: int = 16,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> X3DAnalysisResult:
         """
-        Executes video-level temporal violence analysis using sliding windows.
+        Executes bounded-memory streaming video-level temporal violence analysis using sliding windows.
 
         Args:
             video_path: Path to the CCTV video file.
@@ -218,6 +222,8 @@ class X3DViolenceDetector:
             stride_sec: Sliding stride in seconds between consecutive windows (default 1.0s).
             threshold: Probability threshold above which a window is considered violent (default 0.4).
             context_margin_sec: Additional margin added to start/end of violent segments.
+            batch_size: Batch size of temporal windows evaluated simultaneously on GPU (default 16).
+            progress_callback: Optional callback invoked with (completed_windows, total_windows).
 
         Returns:
             X3DAnalysisResult with classification, timestamps, segments, and timings.
@@ -229,8 +235,6 @@ class X3DViolenceDetector:
         if not os.path.exists(path_str):
             raise FileNotFoundError(f"[X3D] Video not found: {path_str}")
 
-        # 1. Read Video Frames
-        t_pre = time.time()
         cap = cv2.VideoCapture(path_str)
         if not cap.isOpened():
             raise RuntimeError(f"[X3D] Could not open video container: {path_str}")
@@ -239,66 +243,168 @@ class X3DViolenceDetector:
         if fps <= 0:
             fps = 25.0
 
-        raw_frames: List[np.ndarray] = []
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+
+        # Plan Temporal Windows
+        window_len_frames = max(int(round(window_duration_sec * fps)), self.num_frames)
+        stride_frames = max(int(round(stride_sec * fps)), 1)
+
+        window_plan: List[Tuple[int, int]] = []
+        if total_frames > 0:
+            if total_frames <= window_len_frames:
+                window_plan.append((0, total_frames))
+            else:
+                curr = 0
+                while curr + self.num_frames <= total_frames:
+                    e_idx = min(curr + window_len_frames, total_frames)
+                    window_plan.append((curr, e_idx))
+                    if curr + window_len_frames >= total_frames:
+                        break
+                    curr += stride_frames
+
+        total_planned_windows = len(window_plan)
+        logger.info(
+            f"[X3D] Initializing streaming inference for {path_str} "
+            f"({total_frames} frames @ {fps:.1f} fps, {total_planned_windows} planned windows, "
+            f"batch_size={batch_size}, bounded buffer)."
+        )
+
+        # Pre-resolved normalization tensors
+        if not hasattr(self, "mean_t") or self.mean_t is None or self.mean_t.device != self.device:
+            self.mean_t = torch.tensor(self.mean, dtype=torch.float32, device=self.device).view(1, 3, 1, 1, 1)
+            self.std_t = torch.tensor(self.std, dtype=torch.float32, device=self.device).view(1, 3, 1, 1, 1)
+
+        t_pre_total = 0.0
+        t_inf_total = 0.0
+
+        buffer: Dict[int, np.ndarray] = {}
+        windows: List[ViolenceWindow] = []
+        batch_tensors: List[torch.Tensor] = []
+        batch_metadata: List[Tuple[int, float, float]] = []
+
+        curr_frame_idx = 0
+        next_window_idx = 0
+        h, w = self.frame_size, self.frame_size
+        use_amp = self.device.type == "cuda"
+
+        def _flush_batch() -> None:
+            nonlocal batch_tensors, batch_metadata, windows, t_inf_total
+            if not batch_tensors:
+                return
+
+            t_inf_start = time.time()
+            batch_input = torch.cat(batch_tensors, dim=0)
+
+            with torch.no_grad():
+                if use_amp:
+                    with torch.autocast(device_type="cuda", dtype=torch.float16):
+                        logits = self.model(batch_input)
+                else:
+                    logits = self.model(batch_input)
+                probs = F.softmax(logits.float(), dim=1)[:, 1].cpu().numpy()
+
+            for (w_idx, w_start, w_end), p_violent in zip(batch_metadata, probs):
+                windows.append(
+                    ViolenceWindow(
+                        index=w_idx,
+                        start_sec=w_start,
+                        end_sec=w_end,
+                        violent_prob=float(p_violent)
+                    )
+                )
+
+            t_inf_total += (time.time() - t_inf_start)
+            batch_tensors = []
+            batch_metadata = []
+
+            if progress_callback and total_planned_windows > 0:
+                try:
+                    progress_callback(len(windows), total_planned_windows)
+                except Exception as cb_err:
+                    logger.debug(f"[X3D] Progress callback error: {cb_err}")
+
+        # Streaming sliding-buffer reading loop
+        t_decode_start = time.time()
         while True:
             ret, frame = cap.read()
             if not ret or frame is None:
                 break
-            raw_frames.append(frame)
+
+            buffer[curr_frame_idx] = frame
+
+            # If total_frames was unknown at start, plan window dynamically
+            if total_planned_windows == 0:
+                s_cand = next_window_idx * stride_frames
+                if curr_frame_idx + 1 >= s_cand + window_len_frames:
+                    window_plan.append((s_cand, s_cand + window_len_frames))
+
+            # Assemble complete windows from buffer
+            while next_window_idx < len(window_plan):
+                s_idx, e_idx = window_plan[next_window_idx]
+                if curr_frame_idx + 1 >= e_idx:
+                    t_pre_start = time.time()
+                    indices = np.linspace(s_idx, e_idx - 1, num=self.num_frames).astype(int)
+                    sampled = [cv2.resize(buffer[i], (w, h), interpolation=cv2.INTER_LINEAR) for i in indices]
+                    arr = np.stack(sampled, axis=0)
+                    arr = arr[..., ::-1].copy()
+
+                    t_clip = torch.from_numpy(arr).to(self.device).float() / 255.0
+                    t_clip = t_clip.permute(3, 0, 1, 2).contiguous().unsqueeze(0)
+                    t_clip = (t_clip - self.mean_t) / self.std_t
+                    t_pre_total += (time.time() - t_pre_start)
+
+                    batch_tensors.append(t_clip)
+                    batch_metadata.append((next_window_idx, s_idx / fps, e_idx / fps))
+                    next_window_idx += 1
+
+                    if len(batch_tensors) >= batch_size:
+                        _flush_batch()
+                else:
+                    break
+
+            # Evict past frames from buffer to keep memory strictly bounded
+            if next_window_idx < len(window_plan):
+                min_needed_frame = window_plan[next_window_idx][0]
+                evict_keys = [k for k in buffer if k < min_needed_frame]
+                for k in evict_keys:
+                    del buffer[k]
+
+            curr_frame_idx += 1
+
         cap.release()
 
-        n_frames = len(raw_frames)
-        if n_frames == 0:
-            raise RuntimeError(f"[X3D] Video contains no decodable frames: {path_str}")
+        # Handle final partial window at EOF if video was shorter or dynamically planned
+        if total_planned_windows == 0 and curr_frame_idx >= self.num_frames:
+            s_cand = next_window_idx * stride_frames
+            if s_cand + self.num_frames <= curr_frame_idx:
+                e_cand = curr_frame_idx
+                indices = np.linspace(s_cand, e_cand - 1, num=self.num_frames).astype(int)
+                sampled = [cv2.resize(buffer[i], (w, h), interpolation=cv2.INTER_LINEAR) for i in indices]
+                arr = np.stack(sampled, axis=0)[..., ::-1].copy()
+                t_clip = torch.from_numpy(arr).to(self.device).float() / 255.0
+                t_clip = t_clip.permute(3, 0, 1, 2).contiguous().unsqueeze(0)
+                t_clip = (t_clip - self.mean_t) / self.std_t
+                batch_tensors.append(t_clip)
+                batch_metadata.append((next_window_idx, s_cand / fps, e_cand / fps))
+                next_window_idx += 1
+
+        # Process any remaining windows in the final batch
+        _flush_batch()
+        buffer.clear()
+
+        n_frames = curr_frame_idx
+        if n_frames == 0 or len(windows) == 0:
+            raise RuntimeError(f"[X3D] Video contains no decodable frames or windows: {path_str}")
 
         duration = n_frames / fps
-        pre_time = time.time() - t_pre
-        logger.info(f"[X3D] Loaded {n_frames} frames ({duration:.2f}s @ {fps:.1f} fps) in {pre_time:.3f} sec.")
+        pre_time = time.time() - t_decode_start
 
-        # 2. Plan Temporal Windows
-        window_len_frames = max(int(round(window_duration_sec * fps)), self.num_frames)
-        stride_frames = max(int(round(stride_sec * fps)), 1)
+        logger.info(
+            f"[X3D] Streaming evaluation complete: {len(windows)} windows from {n_frames} frames "
+            f"({duration:.2f}s @ {fps:.1f} fps) in {pre_time:.3f}s total (Inference: {t_inf_total:.3f}s)."
+        )
 
-        window_starts: List[int] = []
-        if n_frames <= window_len_frames:
-            window_starts = [0]
-        else:
-            curr = 0
-            while curr + self.num_frames <= n_frames:
-                window_starts.append(curr)
-                if curr + window_len_frames >= n_frames:
-                    break
-                curr += stride_frames
-
-        # 3. Sliding Window Inference
-        t_inf = time.time()
-        windows: List[ViolenceWindow] = []
-
-        with torch.no_grad():
-            for idx, s_idx in enumerate(window_starts):
-                e_idx = min(s_idx + window_len_frames, n_frames)
-                clip_tensor = self.preprocess_clip(raw_frames, s_idx, e_idx).to(self.device)
-
-                logits = self.model(clip_tensor)
-                probs = F.softmax(logits, dim=1)[0].cpu().numpy()
-                p_violent = float(probs[1])
-
-                w_start = s_idx / fps
-                w_end = e_idx / fps
-
-                windows.append(
-                    ViolenceWindow(
-                        index=idx,
-                        start_sec=w_start,
-                        end_sec=w_end,
-                        violent_prob=p_violent
-                    )
-                )
-
-        inf_time = time.time() - t_inf
-        logger.info(f"[X3D] Evaluated {len(windows)} temporal windows in {inf_time:.3f} sec.")
-
-        # 4. Extract and Merge Violent Segments
+        # Extract and Merge Violent Segments
         t_seg = time.time()
         violent_windows = [w for w in windows if w.violent_prob >= thr]
 
@@ -307,19 +413,19 @@ class X3DViolenceDetector:
             groups: List[List[ViolenceWindow]] = []
             current_group: List[ViolenceWindow] = [violent_windows[0]]
 
-            for w in violent_windows[1:]:
+            for w_item in violent_windows[1:]:
                 prev_w = current_group[-1]
-                if w.start_sec <= prev_w.end_sec + 0.5:
-                    current_group.append(w)
+                if w_item.start_sec <= prev_w.end_sec + 0.5:
+                    current_group.append(w_item)
                 else:
                     groups.append(current_group)
-                    current_group = [w]
+                    current_group = [w_item]
             groups.append(current_group)
 
             for grp in groups:
                 raw_start = grp[0].start_sec
                 raw_end = grp[-1].end_sec
-                max_conf = max(w.violent_prob for w in grp)
+                max_conf = max(w_item.violent_prob for w_item in grp)
 
                 final_start = max(0.0, raw_start - context_margin_sec)
                 final_end = min(duration, raw_end + context_margin_sec)
@@ -348,8 +454,8 @@ class X3DViolenceDetector:
 
         timings = {
             "model_loading_sec": 0.0,
-            "video_preprocessing_sec": round(pre_time, 4),
-            "violence_inference_sec": round(inf_time, 4),
+            "video_preprocessing_sec": round(t_pre_total, 4),
+            "violence_inference_sec": round(t_inf_total, 4),
             "segment_extraction_sec": round(seg_time, 4),
             "total_x3d_sec": round(total_time, 4),
         }
