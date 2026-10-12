@@ -268,13 +268,14 @@ def _track_video_segments_sync(
     progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> Tuple[Dict[int, Dict[str, Any]], float, float]:
     """
-    CPU-bound synchronous tracking and crop extraction worker.
-    Executes in a separate threadpool worker to prevent blocking the FastAPI asyncio event loop.
+    Event-triggered person detection and tracking worker.
+    Runs YOLOv8 and ByteTrack ONLY over the padded intervals around detected violence segments.
+    Collects high-quality candidate person observations in bounded memory without executing
+    expensive face detection during frame decoding.
     """
     yolo_detector = YOLOv8Detector()
     yolo_detector.target_classes = [0]  # Dedicated person detection for violence altercation tracking
     tracker = ByteTrackTracker()
-    face_engine = FaceEnrollmentEngine()
 
     cap = cv2.VideoCapture(video_file_path)
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
@@ -283,8 +284,8 @@ def _track_video_segments_sync(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = video_duration or (total_frames / fps if fps > 0 else 0.0)
 
-    # 1. Cluster discrete violence segments into padded temporal intervals.
-    # Avoid tracking huge non-violent time gaps (e.g. 74s lull between altercation 1 and altercation 2)
+    # 1. Cluster discrete violence segments into padded temporal intervals (-2.5s, +3.0s).
+    # Avoid tracking huge non-violent time gaps (e.g. quiet lulls between altercations)
     sorted_segs = sorted(segments, key=lambda s: getattr(s, "start_time", 0.0))
     raw_intervals: List[Tuple[float, float]] = []
     for s in sorted_segs:
@@ -315,11 +316,8 @@ def _track_video_segments_sync(
         total_tracking_frames = max(1, f_end - f_start + 1)
 
     all_video_tracks: Dict[int, Dict[str, Any]] = {}
-    t_yolo_start = time.time()
+    t_yolo_total = 0.0
     t_bytetrack_total = 0.0
-
-    crop_dir = os.path.join(settings.STORAGE_DIR, "crops", str(video_id))
-    os.makedirs(crop_dir, exist_ok=True)
 
     from app.tasks.video_tasks import is_video_cancelled
     frames_processed_so_far = 0
@@ -349,9 +347,20 @@ def _track_video_segments_sync(
             frames_processed_so_far += 1
             t_sec = current_frame_idx / fps
 
-            t_bt_start = time.time()
+            t_track_start = time.time()
             track_result = tracker.track_frame(yolo_detector, frame, persist=True)
-            t_bytetrack_total += (time.time() - t_bt_start)
+            step_duration = time.time() - t_track_start
+
+            # Measure YOLO detection time vs ByteTrack tracking time
+            if track_result is not None and hasattr(track_result, "speed") and isinstance(track_result.speed, dict):
+                yolo_ms = float(track_result.speed.get("inference", 0.0)) + float(track_result.speed.get("preprocess", 0.0))
+                yolo_sec = yolo_ms / 1000.0
+                bt_sec = max(0.0, step_duration - yolo_sec)
+                t_yolo_total += yolo_sec
+                t_bytetrack_total += bt_sec
+            else:
+                t_yolo_total += (step_duration * 0.70)
+                t_bytetrack_total += (step_duration * 0.30)
 
             if track_result is not None and track_result.boxes is not None:
                 boxes = track_result.boxes
@@ -380,7 +389,7 @@ def _track_video_segments_sync(
                             "best_conf": 0.0,
                             "start_time": t_sec,
                             "end_time": t_sec,
-                            "last_face_frame": -100
+                            "_candidate_crops": []
                         }
 
                     trk_entry = all_video_tracks[tracker_id]
@@ -392,94 +401,185 @@ def _track_video_segments_sync(
                         "confidence": round(conf, 4)
                     })
 
-                    crop = frame[y1:y2, x1:x2] if (crop_w >= 36 and crop_h >= 45) else None
-                    if crop is not None and face_engine.model is not None:
-                        cand_faces = trk_entry["candidate_face_crops"]
-                        if len(cand_faces) < 2:
-                            face_interval = 2
-                        elif len(cand_faces) < 4:
-                            face_interval = 4
-                        elif trk_entry["best_face_score"] >= 0.65:
-                            face_interval = 12
+                    # Context-padded observation selection with time-spread binning
+                    if crop_w >= 30 and crop_h >= 40:
+                        # 10-12% contextual padding with safe frame-boundary clamping
+                        pad_x = int(crop_w * 0.12)
+                        pad_y = int(crop_h * 0.12)
+                        px1 = max(0, x1 - pad_x)
+                        py1 = max(0, y1 - pad_y)
+                        px2 = min(w, x2 + pad_x)
+                        py2 = min(h, y2 + pad_y)
+
+                        padded_crop = frame[py1:py2, px1:px2]
+                        pch, pcw = padded_crop.shape[:2]
+
+                        # Measurable upper-body / head-region sharpness (Laplacian variance)
+                        head_h = max(20, int(0.55 * pch))
+                        head_crop = padded_crop[0:head_h, :]
+                        gray_head = cv2.cvtColor(head_crop, cv2.COLOR_BGR2GRAY)
+                        sharpness = float(cv2.Laplacian(gray_head, cv2.CV_64F).var())
+
+                        aspect = crop_h / max(1, crop_w)
+                        aspect_weight = 1.2 if (1.4 <= aspect <= 3.2) else 0.8
+                        # Candidate score combines upper-body sharpness, aspect ratio, square-root size, and confidence
+                        cand_score = float(np.log1p(max(0.0, sharpness)) * aspect_weight * np.sqrt(crop_w * crop_h) * conf)
+
+                        cand_item = {
+                            "crop": padded_crop.copy(),
+                            "frame_idx": current_frame_idx,
+                            "quality": cand_score,
+                            "sharpness": sharpness,
+                            "conf": conf,
+                            "timestamp": t_sec
+                        }
+
+                        cands = trk_entry["_candidate_crops"]
+                        min_gap = max(6, int(fps * 0.25))  # Enforce temporal separation across candidates
+
+                        if len(cands) < 4:
+                            too_close = False
+                            for existing in cands:
+                                if abs(existing["frame_idx"] - current_frame_idx) < min_gap:
+                                    too_close = True
+                                    if cand_score > existing["quality"]:
+                                        existing.update(cand_item)
+                                    break
+                            if not too_close:
+                                cands.append(cand_item)
                         else:
-                            face_interval = 6
-                        should_check_face = (current_frame_idx - trk_entry.get("last_face_frame", -100)) >= face_interval
-                        if should_check_face:
-                            trk_entry["last_face_frame"] = current_frame_idx
-                            try:
-                                ch, cw = crop.shape[:2]
-                                # Single pass on upper 60% of person crop for standing person
-                                detect_crop = crop[0:int(0.60 * ch), :] if (ch / max(1, cw) > 1.2) else crop
-                                faces = face_engine.model.get(detect_crop if detect_crop.size > 0 else crop)
-                                if faces:
-                                    valid_faces = []
-                                    for f in faces:
-                                        if f.det_score < 0.45:
-                                            continue
-                                        fx1, fy1, fx2, fy2 = map(int, f.bbox)
-                                        fw, fh = fx2 - fx1, fy2 - fy1
-                                        if fw < 20 or fh < 20:
-                                            continue
-                                        fcx = (fx1 + fx2) / 2.0
-                                        fcy = (fy1 + fy2) / 2.0
-                                        if fcy > 0.65 * ch:
-                                            continue
-                                        blur_score = face_engine.calculate_blur_score(crop, [fx1, fy1, fx2, fy2])
-                                        if blur_score < 10.0:
-                                            continue
-                                        dist_from_center = abs(fcx - (cw / 2.0)) / max(1.0, cw)
-                                        valid_faces.append((f, dist_from_center, blur_score))
-
-                                    if valid_faces:
-                                        best_f = min(valid_faces, key=lambda item: (item[1] if item[1] > 0.35 else 0.0, -item[0].det_score))[0]
-                                        fx1, fy1, fx2, fy2 = map(int, best_f.bbox)
-                                        pad_w = int((fx2 - fx1) * 0.25)
-                                        pad_h = int((fy2 - fy1) * 0.25)
-                                        face_x1 = max(0, fx1 - pad_w)
-                                        face_y1 = max(0, fy1 - pad_h)
-                                        face_x2 = min(cw, fx2 + pad_w)
-                                        face_y2 = min(ch, fy2 + pad_h)
-                                        face_crop = crop[face_y1:face_y2, face_x1:face_x2] if (face_x2 > face_x1 and face_y2 > face_y1) else crop
-
-                                        cand_filename = f"crop_trk_{tracker_id}_f{current_frame_idx}.jpg"
-                                        cand_path = os.path.join(crop_dir, cand_filename)
-                                        cv2.imwrite(cand_path, face_crop)
-
-                                        emb_vec = best_f.normed_embedding.tolist() if hasattr(best_f, "normed_embedding") and best_f.normed_embedding is not None else None
-                                        if emb_vec is None and hasattr(best_f, "embedding") and best_f.embedding is not None:
-                                            e_norm = np.linalg.norm(best_f.embedding)
-                                            emb_vec = (best_f.embedding / e_norm).tolist() if e_norm > 0 else None
-
-                                        cand_entry = {
-                                            "det_score": float(best_f.det_score),
-                                            "path": cand_path,
-                                            "frame": current_frame_idx,
-                                            "embedding": emb_vec
-                                        }
-                                        if len(cand_faces) < 16:
-                                            cand_faces.append(cand_entry)
-                                        else:
-                                            min_idx = min(range(len(cand_faces)), key=lambda i: cand_faces[i]["det_score"])
-                                            if float(best_f.det_score) > cand_faces[min_idx]["det_score"]:
-                                                cand_faces[min_idx] = cand_entry
-
-                                        if float(best_f.det_score) > trk_entry["best_face_score"]:
-                                            trk_entry["best_face_score"] = float(best_f.det_score)
-                                            trk_entry["best_crop_path"] = cand_path
-                            except Exception as c_err:
-                                logger.debug(f"Face extraction error on crop: {c_err}")
-
-                        if not trk_entry["best_crop_path"] and conf > trk_entry["best_conf"]:
-                            trk_entry["best_conf"] = conf
-                            fb_path = os.path.join(crop_dir, f"crop_trk_{tracker_id}_f{current_frame_idx}.jpg")
-                            cv2.imwrite(fb_path, crop)
-                            trk_entry["best_crop_path"] = fb_path
+                            replaced = False
+                            for existing in cands:
+                                if abs(existing["frame_idx"] - current_frame_idx) < min_gap:
+                                    if cand_score > existing["quality"]:
+                                        existing.update(cand_item)
+                                        replaced = True
+                                    break
+                            if not replaced:
+                                min_cand_idx = min(range(len(cands)), key=lambda i: cands[i]["quality"])
+                                if cand_score > cands[min_cand_idx]["quality"] * 1.25:
+                                    cands[min_cand_idx] = cand_item
 
             current_frame_idx += 1
 
-    t_yolo_total = time.time() - t_yolo_start
     cap.release()
     return all_video_tracks, t_yolo_total, t_bytetrack_total
+
+
+def _detect_faces_on_candidates_sync(
+    crop_dir: str,
+    valid_tracks: Dict[int, Dict[str, Any]]
+) -> Tuple[Dict[int, Dict[str, Any]], float, int]:
+    """
+    Event-triggered face detection: runs InsightFace SCRFD ONLY on selected high-quality
+    candidate person observations from violence intervals, rather than inspecting
+    unrelated frames or repetitively checking blurry turned-away crops.
+    """
+    face_engine = FaceEnrollmentEngine()
+    t_start = time.time()
+    call_count = 0
+    os.makedirs(crop_dir, exist_ok=True)
+
+    for trk_id, trk_entry in valid_tracks.items():
+        candidates = trk_entry.pop("_candidate_crops", [])
+        # Sort candidates descending by quality
+        candidates.sort(key=lambda c: c.get("quality", 0.0), reverse=True)
+
+        cand_face_list = []
+        best_face_score = 0.0
+        best_crop_path = None
+
+        for cand in candidates[:3]:  # At most top 3 candidate observations per track
+            crop = cand.get("crop")
+            frame_idx = cand.get("frame_idx")
+            if crop is None or crop.size == 0 or face_engine.model is None:
+                continue
+
+            ch, cw = crop.shape[:2]
+            # Focus on upper body (head region) for standing human
+            detect_crop = crop[0:int(0.60 * ch), :] if (ch / max(1, cw) > 1.2) else crop
+
+            call_count += 1
+            faces = face_engine.model.get(detect_crop if detect_crop.size > 0 else crop)
+            if not faces:
+                continue
+
+            valid_faces = []
+            for f in faces:
+                if f.det_score < 0.45:
+                    continue
+                fx1, fy1, fx2, fy2 = map(int, f.bbox)
+                fw, fh = fx2 - fx1, fy2 - fy1
+                if fw < 20 or fh < 20:
+                    continue
+                fcx = (fx1 + fx2) / 2.0
+                fcy = (fy1 + fy2) / 2.0
+                if fcy > 0.65 * ch:
+                    continue
+                blur_score = face_engine.calculate_blur_score(crop, [fx1, fy1, fx2, fy2])
+                if blur_score < 10.0:
+                    continue
+                dist_from_center = abs(fcx - (cw / 2.0)) / max(1.0, cw)
+                valid_faces.append((f, dist_from_center, blur_score))
+
+            if valid_faces:
+                best_f = min(valid_faces, key=lambda item: (item[1] if item[1] > 0.35 else 0.0, -item[0].det_score))[0]
+                fx1, fy1, fx2, fy2 = map(int, best_f.bbox)
+                pad_w = int((fx2 - fx1) * 0.25)
+                pad_h = int((fy2 - fy1) * 0.25)
+                face_x1 = max(0, fx1 - pad_w)
+                face_y1 = max(0, fy1 - pad_h)
+                face_x2 = min(cw, fx2 + pad_w)
+                face_y2 = min(ch, fy2 + pad_h)
+                face_crop = crop[face_y1:face_y2, face_x1:face_x2] if (face_x2 > face_x1 and face_y2 > face_y1) else crop
+
+                cand_filename = f"crop_trk_{trk_id}_face_f{frame_idx}.jpg"
+                cand_path = os.path.join(crop_dir, cand_filename)
+                cv2.imwrite(cand_path, face_crop)
+
+                emb_vec = None
+                raw_emb = getattr(best_f, "normed_embedding", None)
+                if raw_emb is None:
+                    raw_emb = getattr(best_f, "embedding", None)
+                if raw_emb is not None:
+                    arr_e = np.array(raw_emb, dtype=np.float32)
+                    if arr_e.shape == (512,) and np.all(np.isfinite(arr_e)):
+                        e_norm = np.linalg.norm(arr_e)
+                        if e_norm > 0:
+                            emb_vec = (arr_e / e_norm).tolist()
+
+                cand_entry = {
+                    "det_score": float(best_f.det_score),
+                    "path": cand_path,
+                    "frame": frame_idx,
+                    "embedding": emb_vec
+                }
+                cand_face_list.append(cand_entry)
+
+                if float(best_f.det_score) > best_face_score:
+                    best_face_score = float(best_f.det_score)
+                    best_crop_path = cand_path
+
+                # Observation reuse / early exit: If this face observation has high detector confidence (>= 0.65),
+                # we have an optimal face observation for this track; stop evaluating further candidates.
+                if float(best_f.det_score) >= 0.65:
+                    break
+
+        trk_entry["candidate_face_crops"] = cand_face_list
+        trk_entry["best_face_score"] = best_face_score
+
+        # If no face was found, save the highest quality body crop as fallback thumbnail
+        if not best_crop_path and candidates:
+            best_cand = candidates[0]
+            fb_filename = f"crop_trk_{trk_id}_body_f{best_cand['frame_idx']}.jpg"
+            fb_path = os.path.join(crop_dir, fb_filename)
+            cv2.imwrite(fb_path, best_cand["crop"])
+            best_crop_path = fb_path
+
+        trk_entry["best_crop_path"] = best_crop_path
+
+    t_elapsed = time.time() - t_start
+    return valid_tracks, t_elapsed, call_count
 
 @router.post("/analyze", response_model=ViolenceAnalysisResponse, status_code=status.HTTP_200_OK)
 async def analyze_video_for_violence(
@@ -630,9 +730,11 @@ async def analyze_video_for_violence(
     t_total_start = time.time()
     t_yolo_total = 0.0
     t_bytetrack_total = 0.0
+    t_face_detect_total = 0.0
     t_arcface_total = 0.0
     t_evidence_total = 0.0
     t_db_total = 0.0
+    face_call_count = 0
 
     now_utc = datetime.now(timezone.utc)
     target_video.status = "processing"
@@ -773,7 +875,7 @@ async def analyze_video_for_violence(
         t_yolo_total += t_yolo_step
         t_bytetrack_total += t_bt_step
 
-        _update_sync_progress(82, "Biometric Student Identification (ArcFace)")
+        _update_sync_progress(78, "Event-Triggered Face Detection (InsightFace)")
 
         from app.tasks.video_tasks import is_video_cancelled
         if is_video_cancelled(target_video.id):
@@ -781,16 +883,28 @@ async def analyze_video_for_violence(
             return None
 
         # Step 2b: Filter out transient micro-tracks (< 4 detections or < 0.20s duration),
-        # but ALWAYS keep tracks that have valid candidate face observations!
+        # but ALWAYS keep tracks that have candidate observations!
         valid_video_tracks = {
             tid: trk for tid, trk in all_video_tracks.items()
             if (len(trk["detections"]) >= 4 and (trk["end_time"] - trk["start_time"]) >= 0.20)
-            or len(trk.get("candidate_face_crops", [])) > 0
+            or len(trk.get("_candidate_crops", [])) > 0
         }
         if not valid_video_tracks:
             valid_video_tracks = all_video_tracks
 
-        # Step 2c: Biometric Student Identification on Candidate Crops
+        # Step 2c: Event-Triggered Face Detection on Curated Track Observations
+        crop_dir = os.path.join(settings.STORAGE_DIR, "crops", str(target_video.id))
+        valid_video_tracks, t_face_detect_step, step_face_calls = await run_in_threadpool(
+            _detect_faces_on_candidates_sync,
+            crop_dir,
+            valid_video_tracks
+        )
+        t_face_detect_total += t_face_detect_step
+        face_call_count += step_face_calls
+
+        _update_sync_progress(86, "Biometric Student Identification (ArcFace)")
+
+        # Step 2d: Biometric Student Identification on Candidate Crops
         t_arc_start = time.time()
         track_identity_cache: Dict[int, Optional[Dict[str, Any]]] = {}
         incident_student_observations: Dict[uuid.UUID, Dict[str, Any]] = {}
@@ -813,6 +927,8 @@ async def analyze_video_for_violence(
         # Preload Student records to eliminate redundant SELECT queries during candidate evaluation
         all_std_res = await db.execute(select(Student))
         enrolled_students_map: Dict[uuid.UUID, Student] = {s.id: s for s in all_std_res.scalars().all()}
+        db_sids = [sid for sid, _ in enrolled_db_embeddings]
+        db_matrix = np.stack([vec for _, vec in enrolled_db_embeddings]) if enrolled_db_embeddings else None
         from app.services.student_identifier import StudentIdentifier
         identifier = StudentIdentifier()
 
@@ -831,22 +947,24 @@ async def analyze_video_for_violence(
                 second_sim = 0.0
                 second_sid = None
 
-                # 1. Direct cosine similarity matching using precomputed normalized embedding
-                if cand_emb and enrolled_db_embeddings:
+                # 1. Vectorized cosine similarity matching using precomputed normalized embedding
+                if cand_emb is not None and isinstance(cand_emb, list) and len(cand_emb) == 512 and db_matrix is not None and len(db_sids) > 0:
                     emb_arr = np.array(cand_emb, dtype=np.float32)
-                    e_norm = np.linalg.norm(emb_arr)
-                    if e_norm > 0:
-                        emb_arr = emb_arr / e_norm
-                    for sid, db_vec in enrolled_db_embeddings:
-                        s_sim = float(np.dot(emb_arr, db_vec))
-                        if s_sim > sim:
-                            second_sim = sim
-                            second_sid = best_sid
-                            sim = s_sim
-                            best_sid = sid
-                        elif s_sim > second_sim:
-                            second_sim = s_sim
-                            second_sid = sid
+                    if np.all(np.isfinite(emb_arr)):
+                        e_norm = np.linalg.norm(emb_arr)
+                        if e_norm > 0:
+                            emb_arr = emb_arr / e_norm
+                            sims = np.dot(db_matrix, emb_arr)
+                    if len(sims) == 1:
+                        sim = float(sims[0])
+                        best_sid = db_sids[0]
+                    elif len(sims) > 1:
+                        top2_idx = np.argpartition(-sims, 1)[:2]
+                        top2_idx = top2_idx[np.argsort(-sims[top2_idx])]
+                        sim = float(sims[top2_idx[0]])
+                        best_sid = db_sids[top2_idx[0]]
+                        second_sim = float(sims[top2_idx[1]])
+                        second_sid = db_sids[top2_idx[1]]
                 elif cand_path and os.path.exists(cand_path):
                     # 2. Fallback to StudentIdentifier if no precomputed embedding
                     try:
@@ -1134,12 +1252,14 @@ async def analyze_video_for_violence(
 
         # Step 3: Complete timing instrumentation
         t_total = time.time() - t_total_start
-        logger.info(f"[YOLO] Processing: {t_yolo_total:.3f} sec")
-        logger.info(f"[ByteTrack] Processing: {t_bytetrack_total:.3f} sec")
-        logger.info(f"[ArcFace] Processing: {t_arcface_total:.3f} sec")
+        logger.info(f"[X3D] Violence Detection: {x3d_res.timings.get('total_x3d_sec', 0.0):.3f} sec")
+        logger.info(f"[YOLO] Person Detection: {t_yolo_total:.3f} sec")
+        logger.info(f"[ByteTrack] Tracking: {t_bytetrack_total:.3f} sec")
+        logger.info(f"[InsightFace] Face Detection: {t_face_detect_total:.3f} sec (Calls: {face_call_count})")
+        logger.info(f"[ArcFace] Student Identification: {t_arcface_total:.3f} sec")
         logger.info(f"[Evidence] Generation: {t_evidence_total:.3f} sec")
         logger.info(f"[DB] Persistence: {t_db_total:.3f} sec")
-        logger.info(f"[TOTAL] {t_total:.3f} sec")
+        logger.info(f"[TOTAL End-to-End]: {t_total:.3f} sec")
 
         target_video.status = "completed"
         target_video.current_stage = "Violence Analysis Completed"
@@ -1471,12 +1591,6 @@ async def _compile_violence_dossier(
             # Fallback if window filtering is strict
             peak_concurrent_persons = 2
 
-        # Shared face engines for dossier compilation
-        from app.pipeline.face_engine import FaceEnrollmentEngine
-        from app.services.student_identifier import StudentIdentifier
-        fe_dossier = FaceEnrollmentEngine()
-        identifier_dossier = StudentIdentifier()
-
         for trk in all_video_tracks:
             in_window = not (trk.end_time < start_t or trk.start_time > end_t)
             is_linked = trk.id in associated_track_ids
@@ -1496,17 +1610,8 @@ async def _compile_violence_dossier(
                     if reid_obj and reid_obj.crop_path:
                         crop_url = _clean_storage_url(reid_obj.crop_path)
 
-                face_visible = False
                 disk_crop_path = trk.key_frame_path
-                if disk_crop_path and os.path.exists(disk_crop_path):
-                    try:
-                        if fe_dossier.model is not None:
-                            c_mat = cv2.imread(disk_crop_path)
-                            if c_mat is not None:
-                                faces = fe_dossier.model.get(c_mat)
-                                face_visible = len(faces) > 0
-                    except Exception:
-                        face_visible = False
+                face_visible = bool(trk.identified_student_id or (disk_crop_path and "_face_" in disk_crop_path))
 
                 matched_student = None
                 id_confidence = "unidentified"
@@ -1541,32 +1646,22 @@ async def _compile_violence_dossier(
                         sim_score = already_in_seg.similarity_score
                         id_confidence = already_in_seg.confidence
 
-                # 3. If not yet identified and crop exists, run StudentIdentifier
-                if not matched_student and disk_crop_path and os.path.exists(disk_crop_path):
-                    try:
-                        match_res = await identifier_dossier.identify_face_in_crop(disk_crop_path)
-                        if match_res and match_res.get("success") and match_res.get("student_id"):
-                            found_id = match_res["student_id"]
-                            sim_score = match_res["similarity_score"]
-                            id_confidence = match_res["confidence"]
-                            s_stmt = select(Student).filter(Student.id == found_id)
-                            s_res = await db.execute(s_stmt)
-                            matched_student = s_res.scalars().first()
-                            if matched_student:
-                                trk.identified_student_id = matched_student.id
-                                rec_obj = StudentRecognitionEvent(
-                                    id=uuid.uuid4(),
-                                    track_id=trk.id,
-                                    student_id=matched_student.id,
-                                    video_id=target_video.id,
-                                    timestamp=datetime.now(timezone.utc),
-                                    similarity_score=sim_score,
-                                    confidence=id_confidence,
-                                    camera_id=str(resolved_camera.id) if resolved_camera else None
-                                )
-                                db.add(rec_obj)
-                    except Exception as ie:
-                        logger.warning(f"Student identification attempt failed for track {trk.id}: {str(ie)}")
+                # 3. Check if track has an associated StudentRecognitionEvent in DB
+                if not matched_student:
+                    rec_check = await db.execute(
+                        select(StudentRecognitionEvent)
+                        .filter(StudentRecognitionEvent.track_id == trk.id)
+                        .order_by(StudentRecognitionEvent.similarity_score.desc())
+                    )
+                    rec_obj = rec_check.scalars().first()
+                    if rec_obj and rec_obj.student_id:
+                        s_stmt = select(Student).filter(Student.id == rec_obj.student_id)
+                        s_res = await db.execute(s_stmt)
+                        matched_student = s_res.scalars().first()
+                        if matched_student:
+                            sim_score = rec_obj.similarity_score
+                            id_confidence = rec_obj.confidence or ("high" if sim_score >= settings.RECOGNITION_HIGH_THRESHOLD else "medium")
+                            face_visible = True
 
                 # 4. Construct student card (only add confirmed matches to seg_students)
                 if matched_student:

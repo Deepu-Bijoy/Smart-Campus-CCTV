@@ -96,3 +96,5 @@ weights/
 
 # Audit/debug scratch files
 backend/scratch/
+scratch/
+
