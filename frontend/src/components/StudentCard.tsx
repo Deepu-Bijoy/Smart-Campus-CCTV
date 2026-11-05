@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { User, Award, Shield } from 'lucide-react';
+import { User, Award, Shield, Trash2 } from 'lucide-react';
 
 export interface StudentData {
   id: string;
@@ -14,9 +14,10 @@ export interface StudentData {
 
 interface StudentCardProps {
   student: StudentData;
+  onDelete?: (student: StudentData) => void;
 }
 
-export const StudentCard: React.FC<StudentCardProps> = ({ student }) => {
+export const StudentCard: React.FC<StudentCardProps> = ({ student, onDelete }) => {
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-5 hover:border-blue-500/50 hover:shadow-md transition duration-300 shadow-sm flex flex-col justify-between">
       <div>
@@ -24,6 +25,15 @@ export const StudentCard: React.FC<StudentCardProps> = ({ student }) => {
           <div className="bg-blue-50 p-3 rounded-xl border border-blue-100">
             <User className="h-6 w-6 text-blue-600" />
           </div>
+          {onDelete && (
+            <button
+              onClick={() => onDelete(student)}
+              className="text-slate-400 hover:text-red-600 transition p-1.5 hover:bg-red-50 rounded-lg border border-transparent hover:border-red-200"
+              title="Delete Student"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <h3 className="font-semibold text-slate-900 text-lg mb-1">{student.name}</h3>
         <p className="text-sm text-slate-500 font-mono mb-4">{student.university_roll_number}</p>

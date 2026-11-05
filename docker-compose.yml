@@ -23,7 +23,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.tasks.cel_app.celery_app worker --loglevel=info -Q video-processing
+    command: celery -A app.tasks.cel_app.celery_app worker --loglevel=info -Q gpu_queue,cpu_queue
     volumes:
       - ./backend:/app
       - backend_storage:/app/storage

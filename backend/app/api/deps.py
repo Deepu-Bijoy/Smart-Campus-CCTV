@@ -26,6 +26,9 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             yield session
             await session.commit()
             logger.debug("Dependency get_db: Session committed.")
+        except HTTPException:
+            await session.rollback()
+            raise
         except Exception as e:
             logger.error(f"Dependency get_db: Transaction exception: {str(e)}")
             await session.rollback()

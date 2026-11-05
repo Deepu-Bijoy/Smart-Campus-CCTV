@@ -2,6 +2,10 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../services/api';
 import { Image as ImageIcon } from 'lucide-react';
 
+// Module-level cache to eliminate repeated network fetches and 404 retries
+const failedUrlSet = new Set<string>();
+const blobUrlCache = new Map<string, string>();
+
 interface AuthenticatedImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
   src: string;
   fallbackIcon?: React.ReactNode;
@@ -31,11 +35,6 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
       return;
     }
 
-    let isMounted = true;
-    let createdUrl: string | null = null;
-    setLoading(true);
-    setError(false);
-
     // Normalize path to fetch via authenticated axios client
     let endpoint = src.replace(/\\/g, '/');
     if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
@@ -58,25 +57,43 @@ export const AuthenticatedImage: React.FC<AuthenticatedImageProps> = ({
       ? `${baseUrlRoot}${endpoint}`
       : `${api.defaults.baseURL || 'http://127.0.0.1:8000/api/v1'}${endpoint}`;
 
+    // 1. If previously confirmed 404 or failed, fail immediately without triggering network requests
+    if (failedUrlSet.has(targetUrl)) {
+      setError(true);
+      setLoading(false);
+      return;
+    }
+
+    // 2. If cached in blobUrlCache, reuse immediately
+    if (blobUrlCache.has(targetUrl)) {
+      setObjectUrl(blobUrlCache.get(targetUrl)!);
+      setLoading(false);
+      setError(false);
+      return;
+    }
+
+    let isMounted = true;
+    setLoading(true);
+    setError(false);
+
     api.get(targetUrl, { responseType: 'blob' })
       .then((res) => {
+        const createdUrl = window.URL.createObjectURL(res.data);
+        blobUrlCache.set(targetUrl, createdUrl);
         if (!isMounted) return;
-        createdUrl = window.URL.createObjectURL(res.data);
         setObjectUrl(createdUrl);
         setLoading(false);
       })
-      .catch((err) => {
+      .catch(() => {
+        // Register in failed set so future renders never re-request this missing asset
+        failedUrlSet.add(targetUrl);
         if (!isMounted) return;
-        console.error('Failed to load authenticated image asset:', err);
         setError(true);
         setLoading(false);
       });
 
     return () => {
       isMounted = false;
-      if (createdUrl) {
-        window.URL.revokeObjectURL(createdUrl);
-      }
     };
   }, [src]);
 

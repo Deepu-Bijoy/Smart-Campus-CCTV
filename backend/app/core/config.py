@@ -218,8 +218,19 @@ class Settings(BaseSettings):
     RECOGNITION_HIGH_THRESHOLD: float = 0.75
     RECOGNITION_MEDIUM_THRESHOLD: float = 0.60
     
-    # Upload Limits (500 MiB = 524,288,000 bytes)
-    MAX_UPLOAD_SIZE_BYTES: int = 524_288_000
+    # Upload Limits (Default 5 GiB = 5,368,709,120 bytes, configurable via MAX_UPLOAD_SIZE_BYTES)
+    MAX_UPLOAD_SIZE_BYTES: int = Field(default=5_368_709_120, validation_alias="MAX_UPLOAD_SIZE_BYTES")
+
+    @property
+    def max_upload_size_formatted(self) -> str:
+        bytes_val = self.MAX_UPLOAD_SIZE_BYTES
+        if bytes_val >= 1024 * 1024 * 1024:
+            gib = bytes_val / (1024 * 1024 * 1024)
+            return f"{int(gib) if gib.is_integer() else round(gib, 1)} GiB"
+        if bytes_val >= 1024 * 1024:
+            mib = bytes_val / (1024 * 1024)
+            return f"{int(mib) if mib.is_integer() else round(mib, 1)} MiB"
+        return f"{bytes_val} B"
     
     # Logging
     LOG_LEVEL: str = "INFO"

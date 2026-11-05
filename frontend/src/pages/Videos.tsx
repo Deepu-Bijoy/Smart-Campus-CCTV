@@ -18,16 +18,45 @@ export const Videos: React.FC = () => {
       await api.delete(`/videos/${id}`);
       return id;
     },
+    retry: false,
     onMutate: async (id: string) => {
-      await queryClient.cancelQueries({ queryKey: ['videos-list'] });
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ['videos-list'] }),
+        queryClient.cancelQueries({ queryKey: ['recent-videos'] }),
+      ]);
       const previousVideos = queryClient.getQueryData(['videos-list']);
+      const previousRecent = queryClient.getQueryData(['recent-videos']);
+
       queryClient.setQueryData(['videos-list'], (old: any) => {
+        if (!old) return old;
         if (Array.isArray(old)) {
           return old.filter((v: any) => v.id !== id);
         }
+        if (old.items && Array.isArray(old.items)) {
+          return {
+            ...old,
+            total: Math.max(0, (old.total || 1) - 1),
+            items: old.items.filter((v: any) => v.id !== id),
+          };
+        }
         return old;
       });
-      return { previousVideos };
+
+      queryClient.setQueryData(['recent-videos'], (old: any) => {
+        if (!old) return old;
+        if (Array.isArray(old)) {
+          return old.filter((v: any) => v.id !== id);
+        }
+        if (old.items && Array.isArray(old.items)) {
+          return {
+            ...old,
+            items: old.items.filter((v: any) => v.id !== id),
+          };
+        }
+        return old;
+      });
+
+      return { previousVideos, previousRecent };
     },
     onSuccess: async () => {
       setIsDeleteModalOpen(false);
@@ -37,24 +66,19 @@ export const Videos: React.FC = () => {
         queryClient.invalidateQueries({ queryKey: ['videos-list'] }),
         queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] }),
         queryClient.invalidateQueries({ queryKey: ['recent-videos'] }),
-        queryClient.invalidateQueries({ queryKey: ['videos'] }),
-        queryClient.refetchQueries({ queryKey: ['dashboard-metrics'] }),
-        queryClient.refetchQueries({ queryKey: ['recent-videos'] }),
       ]);
     },
     onError: (err: any, _id: string, context: any) => {
       if (context?.previousVideos) {
         queryClient.setQueryData(['videos-list'], context.previousVideos);
       }
+      if (context?.previousRecent) {
+        queryClient.setQueryData(['recent-videos'], context.previousRecent);
+      }
       const msg = err.response?.data?.detail || "Unable to delete this video because related analysis records could not be removed. No changes were committed.";
       setDeleteError(msg);
       setIsDeleteModalOpen(false);
       setSelectedVideoId(null);
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['videos-list'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
-      queryClient.invalidateQueries({ queryKey: ['recent-videos'] });
     }
   });
 
@@ -66,6 +90,7 @@ export const Videos: React.FC = () => {
     },
     staleTime: 5000,
     refetchInterval: (query) => {
+      if (deleteMutation.isPending) return false;
       const data = query.state.data;
       const items = Array.isArray(data) ? data : (data?.items || []);
       const hasActive = items.some((v: any) => !TERMINAL_STATUSES.includes((v.status || '').toLowerCase()));

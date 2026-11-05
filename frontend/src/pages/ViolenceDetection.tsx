@@ -18,6 +18,7 @@ import {
 import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import { AuthenticatedImage } from '../components/AuthenticatedImage';
+import { useUploadConfig, formatBytes } from '../config/upload';
 
 export interface UploadedVideoInfo {
   video_id: string;
@@ -109,6 +110,10 @@ export interface ViolenceAnalysisResponse {
 }
 
 export const ViolenceDetection: React.FC = () => {
+  const { data: uploadConfig } = useUploadConfig();
+  const maxUploadSizeBytes = uploadConfig?.max_upload_size_bytes || 5368709120;
+  const uploadLimitFormatted = uploadConfig?.max_upload_size_formatted || formatBytes(maxUploadSizeBytes);
+
   const [file, setFile] = useState<File | null>(null);
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState<number | null>(null);
@@ -160,6 +165,7 @@ export const ViolenceDetection: React.FC = () => {
 
     try {
       const response = await api.post<UploadedVideoInfo>('/violence/upload', formData, {
+        timeout: 0,
         onUploadProgress: (progressEvent) => {
           if (progressEvent.total) {
             const percent = Math.round((progressEvent.loaded * 100) / progressEvent.total);
@@ -178,8 +184,10 @@ export const ViolenceDetection: React.FC = () => {
       }
     } catch (err: any) {
       console.error('Video upload failed:', err);
-      setUploadStatus('error');
-      const msg = err.response?.data?.detail || err.message || 'Unable to upload video to server.';
+      let msg = err.response?.data?.detail || err.message || 'Unable to upload video to server.';
+      if (err.response?.status === 413) {
+        msg = err.response?.data?.detail || `Video upload size exceeds the ${uploadLimitFormatted} limit (${maxUploadSizeBytes.toLocaleString()} bytes).`;
+      }
       setUploadError(msg);
     }
   };
@@ -193,8 +201,8 @@ export const ViolenceDetection: React.FC = () => {
       return;
     }
 
-    if (selectedFile.size > 100 * 1024 * 1024) {
-      setErrorMessage('Video file exceeds the 100MB limit.');
+    if (selectedFile.size > maxUploadSizeBytes) {
+      setErrorMessage(`Video file exceeds the ${uploadLimitFormatted} limit (${maxUploadSizeBytes.toLocaleString()} bytes).`);
       return;
     }
 
@@ -405,7 +413,8 @@ export const ViolenceDetection: React.FC = () => {
 
     segments.forEach((seg) => {
       (seg.students || []).forEach((st) => {
-        if (st.student_id && st.is_identified && st.name && st.name !== 'Unidentified Person') {
+        const isConfirmed = Boolean(st.is_identified || (typeof st.similarity_score === 'number' && st.similarity_score >= 0.60));
+        if (st.student_id && isConfirmed && st.name && st.name !== 'Unidentified Person') {
           const idKey = String(st.student_id);
           if (!map.has(idKey)) {
             map.set(idKey, st);
@@ -420,10 +429,16 @@ export const ViolenceDetection: React.FC = () => {
     });
 
     (analysisResult?.identified_students || []).forEach((st) => {
-      if (st.student_id && st.is_identified && st.name && st.name !== 'Unidentified Person') {
+      const isConfirmed = Boolean(st.is_identified || (typeof st.similarity_score === 'number' && st.similarity_score >= 0.60));
+      if (st.student_id && isConfirmed && st.name && st.name !== 'Unidentified Person') {
         const idKey = String(st.student_id);
         if (!map.has(idKey)) {
           map.set(idKey, st);
+        } else {
+          const existing = map.get(idKey)!;
+          if ((st.similarity_score ?? 0) > (existing.similarity_score ?? 0)) {
+            map.set(idKey, st);
+          }
         }
       }
     });
@@ -483,9 +498,6 @@ export const ViolenceDetection: React.FC = () => {
             </div>
             <p className="text-sm font-semibold text-slate-800">
               Select or drop surveillance video to begin
-            </p>
-            <p className="text-xs text-slate-500 mt-1">
-              Supports MP4, AVI, MKV, or MOV up to 100MB
             </p>
             <button
               type="button"
@@ -839,10 +851,15 @@ export const ViolenceDetection: React.FC = () => {
 
               {/* Identified Persons Section */}
               <div className="p-4 border-t border-slate-200 bg-slate-50/50 space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wide">
-                    Identified Persons
-                  </h3>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wide">
+                      Identified Persons
+                    </h3>
+                    <p className="text-[11px] text-slate-500">
+                      Person identified in detected violence event (biometric face matching; does not determine culpability)
+                    </p>
+                  </div>
                   {confirmedPersons.length > 0 && (
                     <span className="text-[11px] font-mono text-slate-500">
                       {confirmedPersons.length} confirmed {confirmedPersons.length === 1 ? 'match' : 'matches'}

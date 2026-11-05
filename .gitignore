@@ -98,3 +98,6 @@ weights/
 backend/scratch/
 scratch/
 
+
+# Backup files
+*.bak

@@ -12,27 +12,54 @@ from app.models.notification import Notification
 logger = logging.getLogger(__name__)
 
 class WebSocketConnectionManager:
+    LOOPBACK_IPS = {"127.0.0.1", "::1", "localhost", "testclient"}
+    MAX_LOCAL_ATTEMPTS = 60      # 60 attempts per 60 seconds for localhost / loopback
+    MAX_REMOTE_ATTEMPTS = 30     # 30 attempts per 60 seconds for remote clients
+    WINDOW_SECONDS = 60.0
+
     def __init__(self):
         self.active_connections: List[WebSocket] = []
         self.user_connections: Dict[str, List[WebSocket]] = {}
         self.reconnect_attempts: Dict[str, List[float]] = {}
 
-    def is_rate_limited(self, ip_address: str) -> bool:
+    def is_rate_limited(self, ip_address: str, user_id: Optional[str] = None) -> bool:
+        """
+        Check whether an IP address has exceeded the sliding-window connection limit.
+        Local loopback addresses (127.0.0.1, ::1) have a higher burst allowance
+        to prevent developer and multi-tab lockout.
+        """
         now = time.time()
+        limit = self.MAX_LOCAL_ATTEMPTS if ip_address in self.LOOPBACK_IPS else self.MAX_REMOTE_ATTEMPTS
+        
         attempts = self.reconnect_attempts.get(ip_address, [])
-        attempts = [t for t in attempts if now - t < 10.0]
+        attempts = [t for t in attempts if now - t < self.WINDOW_SECONDS]
         self.reconnect_attempts[ip_address] = attempts
 
-        if len(attempts) >= 10:
+        if len(attempts) >= limit:
             return True
-            
+
         self.reconnect_attempts[ip_address].append(now)
+
+        # Periodic memory cleanup for stale IPs
+        if len(self.reconnect_attempts) > 100:
+            stale = [ip for ip, ts in self.reconnect_attempts.items() if not ts or (now - ts[-1] >= self.WINDOW_SECONDS)]
+            for ip in stale:
+                self.reconnect_attempts.pop(ip, None)
+
         return False
+
+    def record_successful_connection(self, ip_address: str, user_id: Optional[str] = None):
+        """
+        Reset reconnect strike history for legitimate successfully authenticated clients
+        so that normal reconnects do not accumulate and lock out authorized users.
+        """
+        if ip_address in self.reconnect_attempts:
+            self.reconnect_attempts.pop(ip_address, None)
 
     async def connect(self, websocket: WebSocket, user_id: Optional[str] = None) -> bool:
         """
         Accept connection safely, ensuring accept is called at most once
-        and only when the connection is in CONNECTING state.
+        and strictly when the connection is in CONNECTING state.
         Associates the websocket with user_id when provided.
         """
         app_state = getattr(websocket, "application_state", None)
@@ -51,37 +78,52 @@ class WebSocketConnectionManager:
             logger.debug("Cannot accept WebSocket: connection already closed or disconnected.")
             return False
 
+        if app_state != WebSocketState.CONNECTING:
+            logger.debug(f"Cannot accept WebSocket: invalid application state {app_state}.")
+            return False
+
         try:
             await websocket.accept()
             if websocket not in self.active_connections:
                 self.active_connections.append(websocket)
             if user_id:
-                u_conns = self.user_connections.setdefault(str(user_id), [])
-                if websocket not in u_conns:
-                    u_conns.append(websocket)
+                uid_str = str(user_id)
+                u_conns = self.user_connections.setdefault(uid_str, [])
+                # Prune dead sockets for this user to avoid leaking stale connections
+                pruned = [c for c in u_conns if getattr(c, "application_state", None) == WebSocketState.CONNECTED and c != websocket]
+                pruned.append(websocket)
+                self.user_connections[uid_str] = pruned
             logger.info(f"WebSocket client connected. Total connections: {len(self.active_connections)}")
             return True
         except (WebSocketDisconnect, RuntimeError, Exception) as exc:
-            logger.warning(f"WebSocket accept failed or client disconnected during handshake: {exc}")
+            logger.info(f"WebSocket client disconnected or handshake aborted: {exc}")
             return False
 
     def disconnect(self, websocket: WebSocket, user_id: Optional[str] = None):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         if user_id and str(user_id) in self.user_connections:
-            if websocket in self.user_connections[str(user_id)]:
-                self.user_connections[str(user_id)].remove(websocket)
+            uid_str = str(user_id)
+            if websocket in self.user_connections[uid_str]:
+                self.user_connections[uid_str].remove(websocket)
+            if not self.user_connections[uid_str]:
+                self.user_connections.pop(uid_str, None)
         else:
             for uid, conns in list(self.user_connections.items()):
                 if websocket in conns:
                     conns.remove(websocket)
+                if not conns:
+                    self.user_connections.pop(uid, None)
         logger.info(f"WebSocket client disconnected. Total connections: {len(self.active_connections)}")
 
     async def prune_dead_connections(self):
         dead_connections = []
         for connection in list(self.active_connections):
             try:
-                await connection.send_json({"type": "PING"})
+                if getattr(connection, "application_state", None) == WebSocketState.CONNECTED:
+                    await connection.send_json({"type": "PING"})
+                else:
+                    dead_connections.append(connection)
             except Exception:
                 dead_connections.append(connection)
 
@@ -89,13 +131,16 @@ class WebSocketConnectionManager:
             self.disconnect(connection)
 
     async def send_to_user(self, user_id: Any, message: dict):
-        """Send message only to active WebSocket connections for this specific user."""
+        """Send message only to active, open WebSocket connections for this specific user."""
         uid_str = str(user_id)
         conns = list(self.user_connections.get(uid_str, []))
         dead = []
         for conn in conns:
             try:
-                await conn.send_json(message)
+                if getattr(conn, "application_state", None) == WebSocketState.CONNECTED:
+                    await conn.send_json(message)
+                else:
+                    dead.append(conn)
             except Exception:
                 dead.append(conn)
         for conn in dead:

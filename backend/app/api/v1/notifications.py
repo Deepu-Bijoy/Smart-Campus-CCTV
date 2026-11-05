@@ -22,12 +22,26 @@ from app.db.session import SessionLocal
 
 from starlette.websockets import WebSocketState
 
-async def _safe_close(websocket: WebSocket, code: int = status.WS_1008_POLICY_VIOLATION):
+WS_4401_UNAUTHORIZED = 4401
+WS_4403_FORBIDDEN = 4403
+WS_4429_RATE_LIMITED = 4429
+
+async def _safe_close(
+    websocket: WebSocket,
+    code: int = status.WS_1008_POLICY_VIOLATION,
+    reason: Optional[str] = None
+):
     try:
         app_state = getattr(websocket, "application_state", None)
         client_state = getattr(websocket, "client_state", None)
+        # If still in CONNECTING state, accept first so that the WebSocket close frame
+        # with our specific RFC private close code (e.g., 4401, 4429) is transmitted
+        # to the client rather than an HTTP 403 upgrade error.
+        if app_state == WebSocketState.CONNECTING:
+            await websocket.accept()
+            app_state = getattr(websocket, "application_state", None)
         if app_state != WebSocketState.DISCONNECTED and client_state != WebSocketState.DISCONNECTED:
-            await websocket.close(code=code)
+            await websocket.close(code=code, reason=reason)
     except Exception:
         pass
 
@@ -39,7 +53,7 @@ async def websocket_endpoint(
     client_ip = websocket.client.host if websocket.client else "unknown"
     if ws_manager.is_rate_limited(client_ip):
         logger.warning(f"WebSocket connection rejected: IP {client_ip} is rate limited.")
-        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=WS_4429_RATE_LIMITED, reason="Rate limited")
         return
 
     auth_token = token
@@ -50,7 +64,7 @@ async def websocket_endpoint(
 
     if not auth_token:
         logger.warning("WebSocket auth failed: Missing authentication credentials.")
-        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=WS_4401_UNAUTHORIZED, reason="Missing credentials")
         return
 
     try:
@@ -62,7 +76,7 @@ async def websocket_endpoint(
         user_id = payload.get("sub")
         if not user_id:
             logger.warning("WebSocket auth failed: claim payload missing subject.")
-            await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+            await _safe_close(websocket, code=WS_4401_UNAUTHORIZED, reason="Invalid token subject")
             return
 
         async with SessionLocal() as db:
@@ -71,33 +85,37 @@ async def websocket_endpoint(
             user = res.scalars().first()
             if not user or not user.is_active:
                 logger.warning(f"WebSocket auth failed: User {user_id} is inactive or does not exist.")
-                await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+                await _safe_close(websocket, code=WS_4401_UNAUTHORIZED, reason="User inactive or not found")
                 return
 
             role = payload.get("role", "operator")
             if role not in ["operator", "admin"]:
                 logger.warning(f"WebSocket auth failed: Incompatible user role '{role}' for user {user_id}.")
-                await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+                await _safe_close(websocket, code=WS_4403_FORBIDDEN, reason="Insufficient permissions")
                 return
 
     except jwt.ExpiredSignatureError:
         logger.warning("WebSocket auth failed: Signature has expired.")
-        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=WS_4401_UNAUTHORIZED, reason="Token expired")
         return
     except jwt.PyJWTError as e:
         logger.warning(f"WebSocket auth failed: JWT decoding error: {str(e)}")
-        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=WS_4401_UNAUTHORIZED, reason="Invalid token")
         return
     except Exception as e:
         logger.error(f"WebSocket auth unexpected exception: {str(e)}")
-        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION)
+        await _safe_close(websocket, code=status.WS_1008_POLICY_VIOLATION, reason="Auth error")
         return
 
-    connected = await ws_manager.connect(websocket, user_id=str(user_id))
-    if not connected:
-        return
-
+    connected = False
     try:
+        connected = await ws_manager.connect(websocket, user_id=str(user_id))
+        if not connected:
+            return
+
+        # Record successful connection and clear rate limit strikes for this client
+        ws_manager.record_successful_connection(client_ip, user_id=str(user_id))
+
         while True:
             data = await websocket.receive_text()
             if data == "PING":
@@ -105,7 +123,8 @@ async def websocket_endpoint(
     except (WebSocketDisconnect, RuntimeError, Exception) as exc:
         logger.debug(f"WebSocket session ended: {exc}")
     finally:
-        ws_manager.disconnect(websocket, user_id=str(user_id))
+        if connected:
+            ws_manager.disconnect(websocket, user_id=str(user_id))
 
 @router.get("", response_model=List[NotificationResponse])
 async def list_notifications(

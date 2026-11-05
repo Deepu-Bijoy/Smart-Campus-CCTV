@@ -111,3 +111,50 @@ class EnrollmentStatusResponse(BaseModel):
     missing_views: List[str]
     enrolled_views: List[str]
     quality_scores: Dict[str, float]
+
+class SameVideoEnrollRequest(BaseModel):
+    video_id: Optional[uuid.UUID] = Field(None, description="Database Video ID")
+    video_path: Optional[str] = Field(None, description="Optional path to local video file")
+    frame_idx: Optional[int] = Field(None, ge=0, description="Exact 0-indexed frame number to extract")
+    timestamp_seconds: Optional[float] = Field(None, ge=0.0, description="Timestamp in seconds to extract")
+    view: str = Field("front", description="Face orientation view (front, left, right, etc.)")
+
+class SameVideoEnrollResponse(BaseModel):
+    success: bool
+    photo_id: uuid.UUID
+    student_id: uuid.UUID
+    video_identifier: str
+    frame_idx: int
+    timestamp_seconds: float
+    resolution: List[int]
+    quality_score: float
+    blur_score: float
+    photo_path: str
+    diagnostic_passed: bool
+    diagnostic_similarity: float
+    message: str
+
+class ControlledDiagnosticResponse(BaseModel):
+    diagnostic_passed: bool
+    similarity_score: float
+    source_frame_idx: Optional[int] = None
+    source_timestamp_seconds: Optional[float] = None
+    checks: Dict[str, Any]
+    diagnostic_inspection_details: List[str] = []
+    safeguard_disclaimer: str
+
+class SameVideoMatchReport(BaseModel):
+    success: bool
+    video_path: str
+    source_frame_idx: Optional[int] = None
+    source_frame_detected: bool
+    source_frame_valid_embedding: bool
+    source_frame_identity_accepted: bool
+    source_frame_similarity_to_enrollment: float
+    source_frame_verified: bool
+    source_frame_observation: Optional[Dict[str, Any]] = None
+    other_frames_evaluation: Dict[str, Any]
+    all_observations_count: int
+    failures: List[Dict[str, Any]] = []
+    safeguards_enforced: Dict[str, Any]
+

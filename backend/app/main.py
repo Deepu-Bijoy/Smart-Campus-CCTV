@@ -13,6 +13,9 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+from app.core.logging_filter import setup_token_redaction_logging
+setup_token_redaction_logging()
+
 import logging as _logging
 _dep_logger = _logging.getLogger("app.startup.deps")
 
@@ -67,13 +70,14 @@ def _check_pipeline_deps():
 
 @app.on_event("startup")
 async def startup_event():
+    setup_token_redaction_logging()
     if "sqlite" in settings.SQLALCHEMY_DATABASE_URI:
         import os
         import shutil
         import sqlite3
 
-        db_path = "./storage/cctv.db"
-        fallback_path = "./storage/sqlite_fallback.db"
+        db_path = os.path.join(settings.STORAGE_DIR, "cctv.db")
+        fallback_path = os.path.join(settings.STORAGE_DIR, "sqlite_fallback.db")
 
         needs_restore = False
         if not os.path.exists(db_path) or os.path.getsize(db_path) == 0:
@@ -403,6 +407,47 @@ async def startup_event():
             except Exception as e:
                 print(f"Database Incident UUID migration notice: {e}")
 
+            # Legacy virtual zone UUID normalization (32-char hex -> 36-char hyphenated canonical UUID)
+            try:
+                z_res = await conn.execute(sqlalchemy.text("SELECT id FROM virtual_zones WHERE length(id) = 32"))
+                legacy_zones = z_res.fetchall()
+                if legacy_zones:
+                    print(f"Database VirtualZone UUID migration: found {len(legacy_zones)} virtual zones with 32-char hex IDs. Normalizing...")
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=OFF"))
+                    import uuid as _norm_zone_uuid
+                    zone_ref_tables = [
+                        ("events", "zone_id"),
+                    ]
+                    for (old_id,) in legacy_zones:
+                        canon_id = str(_norm_zone_uuid.UUID(old_id))
+                        for tbl, col in zone_ref_tables:
+                            await conn.execute(
+                                sqlalchemy.text(f"UPDATE {tbl} SET {col} = :new_id WHERE {col} = :old_id"),
+                                {"new_id": canon_id, "old_id": old_id}
+                            )
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE virtual_zones SET id = :new_id WHERE id = :old_id"),
+                            {"new_id": canon_id, "old_id": old_id}
+                        )
+                    await conn.execute(sqlalchemy.text("PRAGMA foreign_keys=ON"))
+                    print(f"Database VirtualZone UUID migration: successfully normalized {len(legacy_zones)} virtual zones to canonical 36-char format.")
+            except Exception as e:
+                print(f"Database VirtualZone UUID migration notice: {e}")
+
+            try:
+                zc_res = await conn.execute(sqlalchemy.text("SELECT camera_id FROM virtual_zones WHERE length(camera_id) = 32"))
+                legacy_zcams = zc_res.fetchall()
+                if legacy_zcams:
+                    import uuid as _norm_zcam_uuid
+                    for (old_cam_id,) in legacy_zcams:
+                        canon_cam_id = str(_norm_zcam_uuid.UUID(old_cam_id))
+                        await conn.execute(
+                            sqlalchemy.text("UPDATE virtual_zones SET camera_id = :new_id WHERE camera_id = :old_id"),
+                            {"new_id": canon_cam_id, "old_id": old_cam_id}
+                        )
+            except Exception:
+                pass
+
         print("SQLite fallback tables initialized successfully.")
 
         # Sync database face embeddings to Qdrant
@@ -600,7 +645,10 @@ async def get_protected_storage_file(
         )
 
     abs_storage = os.path.abspath(settings.STORAGE_DIR)
-    target_file = os.path.abspath(os.path.join(abs_storage, file_path))
+    clean_path = file_path.lstrip("/").replace("\\", "/")
+    if clean_path.startswith("storage/"):
+        clean_path = clean_path[len("storage/"):]
+    target_file = os.path.abspath(os.path.join(abs_storage, clean_path))
     if os.path.commonpath([abs_storage, target_file]) != abs_storage or not os.path.exists(target_file):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

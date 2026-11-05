@@ -85,33 +85,68 @@ class StudentIdentifier:
             best_match = results[0] if results else None
             student_id = best_match.payload.get("student_id") if best_match else None
             highest_similarity = similarity_scores[0] if similarity_scores else 0.0
+            second_similarity = 0.0
+            second_student_id = None
+            if len(results) > 1:
+                for r_idx in range(1, len(results)):
+                    cand_sid = results[r_idx].payload.get("student_id")
+                    if cand_sid and str(cand_sid) != str(student_id):
+                        second_student_id = cand_sid
+                        second_similarity = similarity_scores[r_idx]
+                        break
 
-            # Fallback to database student face embeddings if Qdrant returned no matches
-            if not best_match:
+            # Fallback to database student face embeddings if Qdrant returned no matches or below threshold
+            if not best_match or highest_similarity < settings.RECOGNITION_MEDIUM_THRESHOLD:
                 try:
                     import json
+                    import time
                     from app.db.session import SessionLocal
                     from sqlalchemy import text
-                    async with SessionLocal() as db_session:
-                        db_res = await db_session.execute(text("SELECT student_id, embedding FROM student_face_embeddings"))
-                        rows = db_res.fetchall()
-                        best_db_sim = 0.0
-                        best_db_sid = None
-                        for sid, raw_emb in rows:
-                            if not raw_emb:
-                                continue
-                            db_vec = np.array(json.loads(raw_emb) if isinstance(raw_emb, str) else raw_emb, dtype=np.float32)
-                            norm = np.linalg.norm(db_vec)
-                            if norm > 0:
-                                db_vec = db_vec / norm
-                            sim = float(np.dot(embedding, db_vec))
-                            if sim > best_db_sim:
-                                best_db_sim = sim
-                                best_db_sid = sid
-                        if best_db_sid:
-                            highest_similarity = best_db_sim
-                            student_id = best_db_sid
-                            print(f"[RECOGNITION FALLBACK] DB fallback matched student {student_id} with similarity {highest_similarity:.4f}")
+
+                    # Check or refresh in-memory cache (TTL: 60s)
+                    now_t = time.time()
+                    if (
+                        not hasattr(StudentIdentifier, "_cached_db_embeddings")
+                        or StudentIdentifier._cached_db_embeddings is None
+                        or (now_t - getattr(StudentIdentifier, "_cached_db_embeddings_ts", 0.0) > 60.0)
+                    ):
+                        async with SessionLocal() as db_session:
+                            db_res = await db_session.execute(text("SELECT student_id, embedding FROM student_face_embeddings"))
+                            rows = db_res.fetchall()
+                            cached_vectors = []
+                            for sid, raw_emb in rows:
+                                if not raw_emb:
+                                    continue
+                                db_vec = np.array(json.loads(raw_emb) if isinstance(raw_emb, str) else raw_emb, dtype=np.float32)
+                                norm = np.linalg.norm(db_vec)
+                                if norm > 0:
+                                    db_vec = db_vec / norm
+                                cached_vectors.append((sid, db_vec))
+                            StudentIdentifier._cached_db_embeddings = cached_vectors
+                            StudentIdentifier._cached_db_embeddings_ts = now_t
+
+                    best_db_sim = 0.0
+                    best_db_sid = None
+                    second_db_sim = 0.0
+                    second_db_sid = None
+                    for sid, db_vec in StudentIdentifier._cached_db_embeddings:
+                        sim = float(np.dot(embedding, db_vec))
+                        if sim > best_db_sim:
+                            if best_db_sid and str(best_db_sid) != str(sid):
+                                second_db_sim = best_db_sim
+                                second_db_sid = best_db_sid
+                            best_db_sim = sim
+                            best_db_sid = sid
+                        elif sim > second_db_sim and (not best_db_sid or str(sid) != str(best_db_sid)):
+                            second_db_sim = sim
+                            second_db_sid = sid
+
+                    if best_db_sid and best_db_sim > highest_similarity:
+                        highest_similarity = best_db_sim
+                        student_id = best_db_sid
+                        second_similarity = second_db_sim
+                        second_student_id = second_db_sid
+                        print(f"[RECOGNITION FALLBACK] DB fallback matched student {student_id} with similarity {highest_similarity:.4f}")
                 except Exception as dbe:
                     logger.warning(f"[RECOGNITION FALLBACK] DB query fallback error: {dbe}")
 
@@ -124,6 +159,15 @@ class StudentIdentifier:
                 print(f"Reason: Highest similarity {highest_similarity:.4f} is below configured recognition threshold {settings.RECOGNITION_MEDIUM_THRESHOLD}")
                 print()
                 return None
+
+            # Ambiguity Rejection: If two distinct enrolled students are within 0.05 of each other, reject
+            if second_student_id and str(second_student_id) != str(student_id) and second_similarity >= settings.RECOGNITION_MEDIUM_THRESHOLD:
+                if (highest_similarity - second_similarity) < 0.05:
+                    print("Accepted or rejected: Rejected")
+                    print(f"Reason: Ambiguous match between student {student_id} ({highest_similarity:.4f}) and {second_student_id} ({second_similarity:.4f})")
+                    print()
+                    return None
+                
                 
             confidence = "high" if highest_similarity >= settings.RECOGNITION_HIGH_THRESHOLD else "medium"
             print("Accepted or rejected: Accepted")

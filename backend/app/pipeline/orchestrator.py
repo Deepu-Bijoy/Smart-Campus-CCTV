@@ -133,6 +133,7 @@ class VideoProcessingOrchestrator:
         track_objects = {}
         person_tracks_count = len([t for t in tracks_list if t.get("object_class") == "person"])
         
+        tracks_to_add = []
         for track_data in tracks_list:
             track_uuid = uuid.uuid4()
             track_obj = Track(
@@ -143,10 +144,13 @@ class VideoProcessingOrchestrator:
                 start_time=track_data["start_time"],
                 end_time=track_data["end_time"]
             )
-            self.db.add(track_obj)
+            tracks_to_add.append(track_obj)
             temp_id_map[track_data["temp_id"]] = track_uuid
             track_objects[track_data["temp_id"]] = track_obj
+        if tracks_to_add:
+            self.db.add_all(tracks_to_add)
             
+        dets_to_add = []
         for det_data in detections_list:
             mapped_track_id = temp_id_map.get(det_data["track_temp_id"])
             if not mapped_track_id:
@@ -160,11 +164,22 @@ class VideoProcessingOrchestrator:
                 bounding_box=det_data["bounding_box"],
                 confidence=det_data["confidence"]
             )
-            self.db.add(det_obj)
+            dets_to_add.append(det_obj)
+        if dets_to_add:
+            # Bounded batching: add in chunks of 1,000 to prevent large SQLAlchemy memory spikes
+            CHUNK_SIZE = 1000
+            for i in range(0, len(dets_to_add), CHUNK_SIZE):
+                self.db.add_all(dets_to_add[i : i + CHUNK_SIZE])
 
         recognized_faces_count = 0
         face_errors = []
+        track_face_cache = {}
+        from app.services.student_identifier import StudentIdentifier
+        from app.models.recognition import StudentRecognitionEvent
+        identifier = StudentIdentifier()
 
+        reids_to_add = []
+        events_to_add = []
         for reid_data in reids_list:
             mapped_track_id = temp_id_map.get(reid_data["track_temp_id"])
             if not mapped_track_id:
@@ -179,17 +194,21 @@ class VideoProcessingOrchestrator:
                 crop_path=reid_data["crop_path"],
                 camera_id=reid_data.get("camera_id", camera_id)
             )
-            self.db.add(reid_obj)
+            reids_to_add.append(reid_obj)
             
             # Run Face Recognition (Upper body crop -> Face detector -> ArcFace)
             try:
-                from app.services.student_identifier import StudentIdentifier
-                from app.models.recognition import StudentRecognitionEvent
-                
-                track_info = next((t for t in tracks_list if t["temp_id"] == reid_data["track_temp_id"]), None)
+                track_temp_id = reid_data["track_temp_id"]
+                track_info = next((t for t in tracks_list if t["temp_id"] == track_temp_id), None)
                 if track_info and track_info.get("object_class") == "person":
-                    identifier = StudentIdentifier()
-                    match_res = await identifier.identify_face_in_crop(reid_data["crop_path"])
+                    cached_match = track_face_cache.get(track_temp_id)
+                    if cached_match and cached_match.get("confidence") == "high":
+                        match_res = cached_match
+                    else:
+                        match_res = await identifier.identify_face_in_crop(reid_data["crop_path"])
+                        if match_res and match_res.get("success"):
+                            track_face_cache[track_temp_id] = match_res
+
                     if match_res and match_res["success"]:
                         event_id = uuid.uuid4()
                         event_obj = StudentRecognitionEvent(
@@ -202,15 +221,20 @@ class VideoProcessingOrchestrator:
                             confidence=match_res["confidence"],
                             camera_id=reid_data.get("camera_id", camera_id)
                         )
-                        self.db.add(event_obj)
+                        events_to_add.append(event_obj)
                         
-                        track_obj = track_objects.get(reid_data["track_temp_id"])
+                        track_obj = track_objects.get(track_temp_id)
                         if track_obj:
                             track_obj.identified_student_id = match_res["student_id"]
                         recognized_faces_count += 1
             except Exception as e:
                 face_errors.append(str(e))
                 logger.error(f"[RECOGNITION AUDIT] Failed to process face identification: {str(e)}")
+
+        if reids_to_add:
+            self.db.add_all(reids_to_add)
+        if events_to_add:
+            self.db.add_all(events_to_add)
 
         stage6_time = time.time() - stage6_start
         print(f"\n--- Stage 6: Face Recognition ---")

@@ -65,3 +65,67 @@ def config_loggers(*args, **kw):
 import app.tasks.video_tasks
 import app.tasks.cpu_tasks
 import app.tasks.bulk_tasks
+
+import time
+from typing import Dict, Any
+
+_worker_status_cache: Dict[str, Any] = {"timestamp": 0.0, "data": {}}
+
+def get_celery_worker_status(timeout: float = 0.5) -> Dict[str, Any]:
+    """
+    Check if Celery workers are active and which queues are being consumed.
+    Uses a 5-second TTL cache to prevent connection overhead on repeated API calls.
+    """
+    global _worker_status_cache
+    now = time.time()
+    if now - _worker_status_cache["timestamp"] < 5.0 and _worker_status_cache["data"]:
+        return _worker_status_cache["data"]
+
+    if celery_app.conf.task_always_eager:
+        res = {
+            "online": True,
+            "eager": True,
+            "workers": ["local_eager"],
+            "active_queues": ["gpu_queue", "cpu_queue"],
+            "error": None
+        }
+        _worker_status_cache = {"timestamp": now, "data": res}
+        return res
+
+    try:
+        insp = celery_app.control.inspect(timeout=timeout)
+        ping_res = insp.ping() if insp else None
+        if ping_res:
+            workers = list(ping_res.keys())
+            active_q = insp.active_queues() or {}
+            all_queues = []
+            for w, q_list in active_q.items():
+                for q in q_list:
+                    if isinstance(q, dict) and "name" in q:
+                        all_queues.append(q["name"])
+            res = {
+                "online": True,
+                "eager": False,
+                "workers": workers,
+                "active_queues": list(set(all_queues)),
+                "error": None
+            }
+        else:
+            res = {
+                "online": False,
+                "eager": False,
+                "workers": [],
+                "active_queues": [],
+                "error": "No active Celery workers responding to ping on broker."
+            }
+    except Exception as e:
+        res = {
+            "online": False,
+            "eager": False,
+            "workers": [],
+            "active_queues": [],
+            "error": str(e)
+        }
+
+    _worker_status_cache = {"timestamp": now, "data": res}
+    return res

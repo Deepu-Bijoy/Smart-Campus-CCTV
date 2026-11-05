@@ -436,24 +436,34 @@ class IncidentInvestigationQueryEngine:
         )
         db.add(ev_video)
 
-        # Find crop image from PersonReid
+        # Find representative evidence screenshot
+        from app.services.evidence_manager import get_or_create_general_evidence_frame
         reid_stmt = select(PersonReid).filter(PersonReid.video_id == video.id).order_by(PersonReid.timestamp_seconds.asc())
         reid_res = await db.execute(reid_stmt)
         reid_obj = reid_res.scalars().first()
         
-        screenshot_url = None
-        if reid_obj:
+        inc_ts_sec = float(reid_obj.timestamp_seconds) if reid_obj and reid_obj.timestamp_seconds is not None else 0.0
+        full_frame_url, _ = get_or_create_general_evidence_frame(
+            video=video,
+            timestamp_seconds=inc_ts_sec,
+            label=f"{incident_type} Incident"
+        )
+        
+        evidence_file_path = reid_obj.crop_path if reid_obj else video.file_path
+        screenshot_url = full_frame_url
+        if not screenshot_url and reid_obj:
+            s_url = reid_obj.crop_path.replace("\\", "/")
+            screenshot_url = "/" + s_url[s_url.find("storage/"):] if "storage/" in s_url else s_url
+
+        if screenshot_url:
             ev_screen = Evidence(
                 id=uuid.uuid4(),
                 incident_id=incident_id,
                 evidence_type="screenshot",
-                file_path=reid_obj.crop_path,
+                file_path=evidence_file_path,
                 timestamp=incident_time
             )
             db.add(ev_screen)
-            s_url = reid_obj.crop_path.replace("\\", "/")
-            if "storage/" in s_url:
-                screenshot_url = "/" + s_url[s_url.find("storage/"):]
 
         try:
             await db.commit()

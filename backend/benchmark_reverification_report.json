@@ -1,0 +1,290 @@
+{
+  "Dataset A (Real CCTV 4s)": {
+    "cold_start": {
+      "dataset": "Dataset A (Real CCTV 4s)",
+      "duration_s": 4.0,
+      "fps": 20.0,
+      "resolution": "640x480",
+      "total_frames": 80,
+      "processed_frames": 80,
+      "t_total_s": 7.542616844177246,
+      "speed_factor": 0.5303199251182861,
+      "stages_s": {
+        "x3d_violence": 1.3558802604675293,
+        "yolo_detection": 1.175851821899414,
+        "bytetrack": 1.0881834030151367,
+        "face_recognition": 2.5090532302856445,
+        "evidence_generation": 1.3549206256866455,
+        "database_persistence": 0.0586094856262207
+      },
+      "resources": {
+        "peak_vram_mb": 226.2177734375,
+        "host_ram_mb": 1515.7265625
+      },
+      "consistency": {
+        "is_violent": false,
+        "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+        "segments_count": 0,
+        "unique_tracks": 0,
+        "total_boxes": 1,
+        "faces_detected": 0
+      }
+    },
+    "warm_runs": [
+      {
+        "dataset": "Dataset A (Real CCTV 4s)",
+        "duration_s": 4.0,
+        "fps": 20.0,
+        "resolution": "640x480",
+        "total_frames": 80,
+        "processed_frames": 80,
+        "t_total_s": 2.320329189300537,
+        "speed_factor": 1.7238933244665164,
+        "stages_s": {
+          "x3d_violence": 0.37210726737976074,
+          "yolo_detection": 0.3669302463531494,
+          "bytetrack": 0.9032633304595947,
+          "face_recognition": 0.4569966793060303,
+          "evidence_generation": 0.21994972229003906,
+          "database_persistence": 0.0009555816650390625
+        },
+        "resources": {
+          "peak_vram_mb": 240.412109375,
+          "host_ram_mb": 1545.4609375
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 1,
+          "faces_detected": 0
+        }
+      },
+      {
+        "dataset": "Dataset A (Real CCTV 4s)",
+        "duration_s": 4.0,
+        "fps": 20.0,
+        "resolution": "640x480",
+        "total_frames": 80,
+        "processed_frames": 80,
+        "t_total_s": 2.007084846496582,
+        "speed_factor": 1.9929401624361334,
+        "stages_s": {
+          "x3d_violence": 0.12741494178771973,
+          "yolo_detection": 0.3537569046020508,
+          "bytetrack": 0.9571690559387207,
+          "face_recognition": 0.45625901222229004,
+          "evidence_generation": 0.1116325855255127,
+          "database_persistence": 0.0007293224334716797
+        },
+        "resources": {
+          "peak_vram_mb": 240.412109375,
+          "host_ram_mb": 1543.41015625
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 1,
+          "faces_detected": 0
+        }
+      }
+    ],
+    "warm_average_time_s": 2.1637070178985596,
+    "warm_average_speed": 1.858416743451325
+  },
+  "Dataset B (Synthetic CCTV 4s)": {
+    "cold_start": {
+      "dataset": "Dataset B (Synthetic CCTV 4s)",
+      "duration_s": 4.0,
+      "fps": 10.0,
+      "resolution": "320x240",
+      "total_frames": 40,
+      "processed_frames": 40,
+      "t_total_s": 1.3561606407165527,
+      "speed_factor": 2.949503089756775,
+      "stages_s": {
+        "x3d_violence": 0.07879066467285156,
+        "yolo_detection": 0.2191908359527588,
+        "bytetrack": 0.4575939178466797,
+        "face_recognition": 0.4187912940979004,
+        "evidence_generation": 0.1810147762298584,
+        "database_persistence": 0.0007202625274658203
+      },
+      "resources": {
+        "peak_vram_mb": 240.412109375,
+        "host_ram_mb": 1482.91796875
+      },
+      "consistency": {
+        "is_violent": false,
+        "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+        "segments_count": 0,
+        "unique_tracks": 0,
+        "total_boxes": 0,
+        "faces_detected": 0
+      }
+    },
+    "warm_runs": [
+      {
+        "dataset": "Dataset B (Synthetic CCTV 4s)",
+        "duration_s": 4.0,
+        "fps": 10.0,
+        "resolution": "320x240",
+        "total_frames": 40,
+        "processed_frames": 40,
+        "t_total_s": 1.4821221828460693,
+        "speed_factor": 2.6988328265345403,
+        "stages_s": {
+          "x3d_violence": 0.07874107360839844,
+          "yolo_detection": 0.16263937950134277,
+          "bytetrack": 0.46550440788269043,
+          "face_recognition": 0.42122459411621094,
+          "evidence_generation": 0.3533508777618408,
+          "database_persistence": 0.0006060600280761719
+        },
+        "resources": {
+          "peak_vram_mb": 240.412109375,
+          "host_ram_mb": 1489.64453125
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 0,
+          "faces_detected": 0
+        }
+      },
+      {
+        "dataset": "Dataset B (Synthetic CCTV 4s)",
+        "duration_s": 4.0,
+        "fps": 10.0,
+        "resolution": "320x240",
+        "total_frames": 40,
+        "processed_frames": 40,
+        "t_total_s": 1.4681291580200195,
+        "speed_factor": 2.7245559276232667,
+        "stages_s": {
+          "x3d_violence": 0.0774238109588623,
+          "yolo_detection": 0.16883182525634766,
+          "bytetrack": 0.5489368438720703,
+          "face_recognition": 0.45186924934387207,
+          "evidence_generation": 0.22043156623840332,
+          "database_persistence": 0.0005781650543212891
+        },
+        "resources": {
+          "peak_vram_mb": 240.412109375,
+          "host_ram_mb": 1492.52734375
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 0,
+          "faces_detected": 0
+        }
+      }
+    ],
+    "warm_average_time_s": 1.4751256704330444,
+    "warm_average_speed": 2.7116943770789037
+  },
+  "Dataset C (Multi-Action CCTV 20s)": {
+    "cold_start": {
+      "dataset": "Dataset C (Multi-Action CCTV 20s)",
+      "duration_s": 20.0,
+      "fps": 10.0,
+      "resolution": "320x240",
+      "total_frames": 200,
+      "processed_frames": 200,
+      "t_total_s": 4.214890718460083,
+      "speed_factor": 4.745081506480204,
+      "stages_s": {
+        "x3d_violence": 0.4142904281616211,
+        "yolo_detection": 0.8009755611419678,
+        "bytetrack": 2.4193079471588135,
+        "face_recognition": 0.4751400947570801,
+        "evidence_generation": 0.10420846939086914,
+        "database_persistence": 0.0007445812225341797
+      },
+      "resources": {
+        "peak_vram_mb": 1166.068359375,
+        "host_ram_mb": 1520.97265625
+      },
+      "consistency": {
+        "is_violent": false,
+        "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+        "segments_count": 0,
+        "unique_tracks": 0,
+        "total_boxes": 0,
+        "faces_detected": 0
+      }
+    },
+    "warm_runs": [
+      {
+        "dataset": "Dataset C (Multi-Action CCTV 20s)",
+        "duration_s": 20.0,
+        "fps": 10.0,
+        "resolution": "320x240",
+        "total_frames": 200,
+        "processed_frames": 200,
+        "t_total_s": 4.258251428604126,
+        "speed_factor": 4.696763527313861,
+        "stages_s": {
+          "x3d_violence": 0.4700751304626465,
+          "yolo_detection": 0.7974393367767334,
+          "bytetrack": 2.363546371459961,
+          "face_recognition": 0.43017101287841797,
+          "evidence_generation": 0.19573497772216797,
+          "database_persistence": 0.0010533332824707031
+        },
+        "resources": {
+          "peak_vram_mb": 1166.068359375,
+          "host_ram_mb": 1521.55859375
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 0,
+          "faces_detected": 0
+        }
+      },
+      {
+        "dataset": "Dataset C (Multi-Action CCTV 20s)",
+        "duration_s": 20.0,
+        "fps": 10.0,
+        "resolution": "320x240",
+        "total_frames": 200,
+        "processed_frames": 200,
+        "t_total_s": 4.0667946338653564,
+        "speed_factor": 4.9178780343256845,
+        "stages_s": {
+          "x3d_violence": 0.49027538299560547,
+          "yolo_detection": 0.7741198539733887,
+          "bytetrack": 2.2804031372070312,
+          "face_recognition": 0.4338798522949219,
+          "evidence_generation": 0.08657360076904297,
+          "database_persistence": 0.0012929439544677734
+        },
+        "resources": {
+          "peak_vram_mb": 1166.068359375,
+          "host_ram_mb": 1521.546875
+        },
+        "consistency": {
+          "is_violent": false,
+          "verdict": "Normal campus activity verified. No violence or aggressive physical altercations detected.",
+          "segments_count": 0,
+          "unique_tracks": 0,
+          "total_boxes": 0,
+          "faces_detected": 0
+        }
+      }
+    ],
+    "warm_average_time_s": 4.162523031234741,
+    "warm_average_speed": 4.807320780819772
+  }
+}

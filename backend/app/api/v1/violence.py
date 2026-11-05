@@ -43,7 +43,9 @@ from app.schemas.violence import (
     InvolvedStudentCard,
     ViolenceReportRequest,
     ViolenceVideoUploadResponse,
-    SegmentTrackInfo
+    SegmentTrackInfo,
+    StudentVerificationResult,
+    TargetedParticipantVerification
 )
 from app.api.v1.videos import resolve_camera_id
 
@@ -99,6 +101,18 @@ def check_video_integrity(file_path: str) -> tuple[bool, Optional[str]]:
     except Exception as e:
         return False, f"Error inspecting video codec/stream: {str(e)}"
 
+@router.get("/config")
+@router.get("/upload-config")
+async def get_violence_upload_config() -> Any:
+    """
+    Returns the configured video upload limit and allowed video formats for Violence Detection.
+    """
+    return {
+        "max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES,
+        "max_upload_size_formatted": settings.max_upload_size_formatted,
+        "allowed_formats": ["MP4", "AVI", "MKV", "MOV"]
+    }
+
 @router.post("/upload", response_model=ViolenceVideoUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_violence_video(
     file: UploadFile = File(...),
@@ -109,7 +123,7 @@ async def upload_violence_video(
 ) -> Any:
     """
     Dedicated video upload endpoint for the Violence Detection module.
-    Validates file extension, size limit (500 MiB / 524,288,000 bytes), and video stream integrity (non-corrupt).
+    Validates file extension, configured size limit, and video stream integrity (non-corrupt).
     Stores video securely in storage directory, extracts metadata, creates Video record,
     and returns unique video_id without initiating general background Celery task.
     """
@@ -132,7 +146,7 @@ async def upload_violence_video(
     # 2. Validate File Size & Save Stream
     try:
         total_size = 0
-        max_size = settings.MAX_UPLOAD_SIZE_BYTES  # 500 MiB (524,288,000 bytes)
+        max_size = settings.MAX_UPLOAD_SIZE_BYTES
         with open(saved_path, "wb") as buffer:
             while chunk := await file.read(1024 * 1024):
                 total_size += len(chunk)
@@ -142,7 +156,7 @@ async def upload_violence_video(
                         os.remove(saved_path)
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Video upload size exceeds 500 MiB limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
+                        detail=f"Video upload size exceeds {settings.max_upload_size_formatted} limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
                     )
                 buffer.write(chunk)
     except HTTPException:
@@ -265,14 +279,18 @@ def _track_video_segments_sync(
     video_id: uuid.UUID,
     segments: List[Any],
     video_duration: Optional[float] = None,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    pre_incident_margin: float = 4.5
 ) -> Tuple[Dict[int, Dict[str, Any]], float, float]:
     """
     Event-triggered person detection and tracking worker.
     Runs YOLOv8 and ByteTrack ONLY over the padded intervals around detected violence segments.
-    Collects high-quality candidate person observations in bounded memory without executing
-    expensive face detection during frame decoding.
+    Incorporates a bounded pre-incident recovery window (-4.5s pre-incident, +3.0s post-incident)
+    to recover upright frontal face observations before altercation commencement.
     """
+    if not segments:
+        return {}, 0.0, 0.0
+
     yolo_detector = YOLOv8Detector()
     yolo_detector.target_classes = [0]  # Dedicated person detection for violence altercation tracking
     tracker = ByteTrackTracker()
@@ -284,13 +302,18 @@ def _track_video_segments_sync(
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = video_duration or (total_frames / fps if fps > 0 else 0.0)
 
-    # 1. Cluster discrete violence segments into padded temporal intervals (-2.5s, +3.0s).
+    # 1. Cluster discrete violence segments into bounded temporal intervals (-4.5s pre-incident, +3.0s post-incident).
     # Avoid tracking huge non-violent time gaps (e.g. quiet lulls between altercations)
-    sorted_segs = sorted(segments, key=lambda s: getattr(s, "start_time", 0.0))
+    def _get_seg_time(s: Any, key: str) -> float:
+        if isinstance(s, dict):
+            return float(s.get(key, 0.0))
+        return float(getattr(s, key, 0.0))
+
+    sorted_segs = sorted(segments, key=lambda s: _get_seg_time(s, "start_time"))
     raw_intervals: List[Tuple[float, float]] = []
     for s in sorted_segs:
-        st = max(0.0, float(getattr(s, "start_time", 0.0)) - 2.5)
-        et = min(duration, float(getattr(s, "end_time", 0.0)) + 3.0) if duration > 0 else (float(getattr(s, "end_time", 0.0)) + 3.0)
+        st = max(0.0, _get_seg_time(s, "start_time") - pre_incident_margin)
+        et = min(duration, _get_seg_time(s, "end_time") + 3.0) if duration > 0 else (_get_seg_time(s, "end_time") + 3.0)
         if not raw_intervals:
             raw_intervals.append((st, et))
         else:
@@ -310,10 +333,7 @@ def _track_video_segments_sync(
             total_tracking_frames += (f_end - f_start + 1)
 
     if not frame_intervals:
-        f_start = 0
-        f_end = min(total_frames - 1, int(duration * fps)) if total_frames > 0 else 0
-        frame_intervals = [(f_start, f_end)]
-        total_tracking_frames = max(1, f_end - f_start + 1)
+        return {}, 0.0, 0.0
 
     all_video_tracks: Dict[int, Dict[str, Any]] = {}
     t_yolo_total = 0.0
@@ -403,9 +423,9 @@ def _track_video_segments_sync(
 
                     # Context-padded observation selection with time-spread binning
                     if crop_w >= 30 and crop_h >= 40:
-                        # 10-12% contextual padding with safe frame-boundary clamping
-                        pad_x = int(crop_w * 0.12)
-                        pad_y = int(crop_h * 0.12)
+                        # 12-15% contextual padding with safe frame-boundary clamping
+                        pad_x = int(crop_w * 0.15)
+                        pad_y = int(crop_h * 0.15)
                         px1 = max(0, x1 - pad_x)
                         py1 = max(0, y1 - pad_y)
                         px2 = min(w, x2 + pad_x)
@@ -418,7 +438,7 @@ def _track_video_segments_sync(
                         head_h = max(20, int(0.55 * pch))
                         head_crop = padded_crop[0:head_h, :]
                         gray_head = cv2.cvtColor(head_crop, cv2.COLOR_BGR2GRAY)
-                        sharpness = float(cv2.Laplacian(gray_head, cv2.CV_64F).var())
+                        sharpness = float(cv2.Laplacian(gray_head, cv2.CV_32F).var())
 
                         aspect = crop_h / max(1, crop_w)
                         aspect_weight = 1.2 if (1.4 <= aspect <= 3.2) else 0.8
@@ -431,7 +451,12 @@ def _track_video_segments_sync(
                             "quality": cand_score,
                             "sharpness": sharpness,
                             "conf": conf,
-                            "timestamp": t_sec
+                            "timestamp": t_sec,
+                            "person_bbox": [x1, y1, x2, y2],
+                            "pad_box": [px1, py1, px2, py2],
+                            "orig_w": crop_w,
+                            "orig_h": crop_h,
+                            "trk_id": tracker_id
                         }
 
                         cands = trk_entry["_candidate_crops"]
@@ -466,14 +491,50 @@ def _track_video_segments_sync(
     return all_video_tracks, t_yolo_total, t_bytetrack_total
 
 
+def _compute_face_observation_quality(
+    det_score: float,
+    blur_score: float,
+    fw: int,
+    fh: int,
+    dist_from_center: float = 0.0
+) -> float:
+    """
+    Computes a deterministic biometric quality score for a detected face observation.
+    Combines detector confidence, face pixel resolution, measured face blur score (Laplacian variance),
+    and bounding-box centrality within the person crop.
+    """
+    try:
+        det_conf = float(det_score) if det_score is not None else 0.0
+        # Normalize detector confidence: 0.40 -> 0.0, 0.95 -> 1.0
+        norm_conf = max(0.0, min(1.0, (det_conf - 0.40) / 0.55))
+
+        # Normalize face size: minimum 20px -> 0.20, >= 60px -> 1.0
+        face_size = float(np.sqrt(max(0, fw * fh)))
+        norm_size = max(0.20, min(1.0, face_size / 60.0))
+
+        # Normalize sharpness: 10.0 -> 0.10, >= 200.0 -> 1.0
+        b_val = float(blur_score) if blur_score is not None else 0.0
+        norm_sharp = max(0.10, min(1.0, float(np.log1p(max(0.0, b_val)) / np.log1p(200.0))))
+
+        # Bounding box centrality penalty if face is pushed to crop border
+        norm_center = max(0.50, min(1.0, 1.0 - float(dist_from_center)))
+
+        # Weighted combination favoring detector confidence and resolution
+        score = norm_conf * (norm_size ** 0.6) * (norm_sharp ** 0.4) * norm_center
+        return float(round(score, 4))
+    except Exception:
+        return float(round(max(0.0, float(det_score or 0.0)), 4))
+
+
 def _detect_faces_on_candidates_sync(
     crop_dir: str,
     valid_tracks: Dict[int, Dict[str, Any]]
 ) -> Tuple[Dict[int, Dict[str, Any]], float, int]:
     """
-    Event-triggered face detection: runs InsightFace SCRFD ONLY on selected high-quality
-    candidate person observations from violence intervals, rather than inspecting
-    unrelated frames or repetitively checking blurry turned-away crops.
+    Event-triggered face detection: runs InsightFace SCRFD on curated candidate person observations.
+    Evaluates all available candidates for each track without premature early-exit, performs
+    face-to-person association checks to reject adjacent bystanders, and deterministically
+    selects the highest-quality face observation.
     """
     face_engine = FaceEnrollmentEngine()
     t_start = time.time()
@@ -482,20 +543,37 @@ def _detect_faces_on_candidates_sync(
 
     for trk_id, trk_entry in valid_tracks.items():
         candidates = trk_entry.pop("_candidate_crops", [])
-        # Sort candidates descending by quality
+        # Sort candidates descending by temporal selection quality
         candidates.sort(key=lambda c: c.get("quality", 0.0), reverse=True)
 
         cand_face_list = []
         best_face_score = 0.0
         best_crop_path = None
 
-        for cand in candidates[:3]:  # At most top 3 candidate observations per track
+        # Evaluate all available candidates up to bounded candidate limit (3)
+        for cand in candidates[:3]:
             crop = cand.get("crop")
             frame_idx = cand.get("frame_idx")
+            t_sec = cand.get("timestamp")
+            p_bbox = cand.get("person_bbox")
+            pad_box = cand.get("pad_box")
+
             if crop is None or crop.size == 0 or face_engine.model is None:
                 continue
 
             ch, cw = crop.shape[:2]
+
+            # Person association coordinates: resolve original person box relative to padded crop
+            inner_x1 = None
+            inner_x2 = None
+            orig_pw = cw
+            if p_bbox and pad_box:
+                px1, py1, px2, py2 = pad_box
+                ox1, oy1, ox2, oy2 = p_bbox
+                inner_x1 = ox1 - px1
+                inner_x2 = ox2 - px1
+                orig_pw = max(1, ox2 - ox1)
+
             # Focus on upper body (head region) for standing human
             detect_crop = crop[0:int(0.60 * ch), :] if (ch / max(1, cw) > 1.2) else crop
 
@@ -506,24 +584,41 @@ def _detect_faces_on_candidates_sync(
 
             valid_faces = []
             for f in faces:
-                if f.det_score < 0.45:
+                if f.det_score < 0.40:
                     continue
                 fx1, fy1, fx2, fy2 = map(int, f.bbox)
                 fw, fh = fx2 - fx1, fy2 - fy1
-                if fw < 20 or fh < 20:
+                if fw < 12 or fh < 12:
                     continue
                 fcx = (fx1 + fx2) / 2.0
                 fcy = (fy1 + fy2) / 2.0
                 if fcy > 0.65 * ch:
                     continue
+
+                # Association check: face center must be within the tracked person's horizontal span
+                # (with 5% tolerance for slight head tilt). Rejects faces belonging to adjacent persons.
+                if inner_x1 is not None and inner_x2 is not None:
+                    if (fcx < inner_x1 - 0.05 * orig_pw) or (fcx > inner_x2 + 0.05 * orig_pw):
+                        continue
+                else:
+                    dist_from_center = abs(fcx - (cw / 2.0)) / max(1.0, cw)
+                    if dist_from_center > 0.40:
+                        continue
+
+                dist_from_center = abs(fcx - (cw / 2.0)) / max(1.0, cw)
                 blur_score = face_engine.calculate_blur_score(crop, [fx1, fy1, fx2, fy2])
                 if blur_score < 10.0:
                     continue
-                dist_from_center = abs(fcx - (cw / 2.0)) / max(1.0, cw)
-                valid_faces.append((f, dist_from_center, blur_score))
+
+                face_q = _compute_face_observation_quality(f.det_score, blur_score, fw, fh, dist_from_center)
+                valid_faces.append((f, dist_from_center, blur_score, face_q, fw, fh))
 
             if valid_faces:
-                best_f = min(valid_faces, key=lambda item: (item[1] if item[1] > 0.35 else 0.0, -item[0].det_score))[0]
+                # Select the highest-quality face in this candidate observation
+                best_f, dist_from_center, blur_score, face_q, fw, fh = max(
+                    valid_faces,
+                    key=lambda item: item[3]
+                )
                 fx1, fy1, fx2, fy2 = map(int, best_f.bbox)
                 pad_w = int((fx2 - fx1) * 0.25)
                 pad_h = int((fy2 - fy1) * 0.25)
@@ -550,36 +645,210 @@ def _detect_faces_on_candidates_sync(
 
                 cand_entry = {
                     "det_score": float(best_f.det_score),
+                    "quality_score": float(face_q),
+                    "blur_score": float(blur_score),
+                    "face_dims": [int(fw), int(fh)],
+                    "face_bbox": [int(fx1), int(fy1), int(fx2), int(fy2)],
+                    "person_bbox": p_bbox,
                     "path": cand_path,
                     "frame": frame_idx,
+                    "timestamp": t_sec,
+                    "trk_id": trk_id,
                     "embedding": emb_vec
                 }
                 cand_face_list.append(cand_entry)
 
-                if float(best_f.det_score) > best_face_score:
-                    best_face_score = float(best_f.det_score)
-                    best_crop_path = cand_path
-
-                # Observation reuse / early exit: If this face observation has high detector confidence (>= 0.65),
-                # we have an optimal face observation for this track; stop evaluating further candidates.
-                if float(best_f.det_score) >= 0.65:
-                    break
-
         trk_entry["candidate_face_crops"] = cand_face_list
-        trk_entry["best_face_score"] = best_face_score
 
-        # If no face was found, save the highest quality body crop as fallback thumbnail
-        if not best_crop_path and candidates:
+        if cand_face_list:
+            # Deterministically select the highest-quality observation across all candidates
+            best_cand_entry = max(
+                cand_face_list,
+                key=lambda c: (c.get("quality_score", 0.0), c.get("det_score", 0.0))
+            )
+            trk_entry["best_face_score"] = best_cand_entry["det_score"]
+            trk_entry["best_quality_score"] = best_cand_entry["quality_score"]
+            trk_entry["best_crop_path"] = best_cand_entry["path"]
+        elif candidates:
+            # Fallback to body thumbnail if no face was detectable across any candidate
             best_cand = candidates[0]
             fb_filename = f"crop_trk_{trk_id}_body_f{best_cand['frame_idx']}.jpg"
             fb_path = os.path.join(crop_dir, fb_filename)
             cv2.imwrite(fb_path, best_cand["crop"])
-            best_crop_path = fb_path
-
-        trk_entry["best_crop_path"] = best_crop_path
+            trk_entry["best_face_score"] = 0.0
+            trk_entry["best_quality_score"] = 0.0
+            trk_entry["best_crop_path"] = fb_path
+        else:
+            trk_entry["best_face_score"] = 0.0
+            trk_entry["best_quality_score"] = 0.0
+            trk_entry["best_crop_path"] = None
 
     t_elapsed = time.time() - t_start
     return valid_tracks, t_elapsed, call_count
+
+def validate_pre_incident_track_association(
+    incident_track: Dict[str, Any],
+    candidate_pre_track: Dict[str, Any],
+    all_pre_tracks: List[Dict[str, Any]],
+    incident_start_sec: float,
+    max_time_gap: float = 1.5,
+    max_spatial_drift: float = 1.5,
+    reid_threshold: float = 0.70,
+    reid_ambiguity_margin: float = 0.15
+) -> Tuple[bool, Optional[str], Optional[float]]:
+    """
+    Defensible association validator between an incident participant track and an earlier pre-incident track.
+    Enforces:
+    1. Temporal continuity: pre-track must end within max_time_gap seconds before incident track starts.
+       Cannot overlap concurrently (which would represent two distinct people).
+    2. Spatial trajectory continuity: bounding box center distance and scale ratio must indicate physical plausibility.
+    3. Visual appearance (OSNet Re-ID) when available: cosine similarity >= reid_threshold (0.70),
+       with conservative ambiguity rejection (no runner-up pre-track within reid_ambiguity_margin).
+    4. Rejects association if Re-ID is unavailable or multiple pre-tracks could match.
+    """
+    try:
+        inc_st = float(incident_track.get("start_time", 0.0))
+        pre_et = float(candidate_pre_track.get("end_time", 0.0))
+        time_gap = inc_st - pre_et
+
+        # Condition 1: Must be temporal sequence without negative overlap (concurrent people) or excessive void
+        if time_gap < -0.20 or time_gap > max_time_gap:
+            return False, "Temporal gap invalid or overlapping", None
+
+        # Condition 2: Spatial continuity
+        pre_dets = candidate_pre_track.get("detections", [])
+        inc_dets = incident_track.get("detections", [])
+        if not pre_dets or not inc_dets:
+            return False, "Missing detection trajectory boxes", None
+
+        last_pre_box = pre_dets[-1].get("bounding_box") or pre_dets[-1].get("bbox", [])
+        first_inc_box = inc_dets[0].get("bounding_box") or inc_dets[0].get("bbox", [])
+        if len(last_pre_box) != 4 or len(first_inc_box) != 4:
+            return False, "Malformed bounding box coordinates", None
+
+        bx1, by1, bx2, by2 = last_pre_box
+        ax1, ay1, ax2, ay2 = first_inc_box
+        bcx, bcy = (bx1 + bx2) / 2.0, (by1 + by2) / 2.0
+        acx, acy = (ax1 + ax2) / 2.0, (ay1 + ay2) / 2.0
+        b_area = max(1.0, (bx2 - bx1) * (by2 - by1))
+        a_area = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+
+        # Normalized spatial drift relative to person box scale
+        norm_dist = np.sqrt((bcx - acx) ** 2 + (bcy - acy) ** 2) / np.sqrt(b_area)
+        if norm_dist > max_spatial_drift:
+            return False, f"Spatial trajectory drift too large ({norm_dist:.2f} > {max_spatial_drift})", None
+
+        # Scale consistency
+        scale_ratio = b_area / a_area
+        if scale_ratio < 0.50 or scale_ratio > 2.0:
+            return False, f"Bounding box scale ratio inconsistent ({scale_ratio:.2f})", None
+
+        # Condition 3: Visual appearance verification via OSNet Re-ID (if available)
+        pre_emb = candidate_pre_track.get("reid_embedding")
+        inc_emb = incident_track.get("reid_embedding")
+
+        # If OSNet extractor is available and embeddings are not cached, attempt extraction
+        if (pre_emb is None or inc_emb is None) and candidate_pre_track.get("best_crop_path") and incident_track.get("best_crop_path"):
+            try:
+                from app.pipeline.reid import OSNetReIDExtractor
+                reid_ext = OSNetReIDExtractor()
+                if reid_ext.extractor is not None:
+                    p_img = cv2.imread(candidate_pre_track["best_crop_path"])
+                    i_img = cv2.imread(incident_track["best_crop_path"])
+                    if p_img is not None and i_img is not None:
+                        embs = reid_ext.extract_batch([
+                            cv2.cvtColor(p_img, cv2.COLOR_BGR2RGB),
+                            cv2.cvtColor(i_img, cv2.COLOR_BGR2RGB)
+                        ])
+                        if len(embs) == 2:
+                            pre_emb = embs[0]
+                            inc_emb = embs[1]
+                            candidate_pre_track["reid_embedding"] = pre_emb
+                            incident_track["reid_embedding"] = inc_emb
+            except Exception:
+                pass
+
+        if pre_emb is not None and inc_emb is not None:
+            v_pre = np.array(pre_emb, dtype=np.float32)
+            v_inc = np.array(inc_emb, dtype=np.float32)
+            sim = float(np.dot(v_pre, v_inc))
+
+            if sim < reid_threshold:
+                return False, f"OSNet appearance similarity below threshold ({sim:.3f} < {reid_threshold})", sim
+
+            # Conservative ambiguity gating: check against other candidate pre-tracks
+            for other_pt in all_pre_tracks:
+                if other_pt.get("tracker_id") == candidate_pre_track.get("tracker_id"):
+                    continue
+                o_emb = other_pt.get("reid_embedding")
+                if o_emb is not None:
+                    o_sim = float(np.dot(v_inc, np.array(o_emb, dtype=np.float32)))
+                    if o_sim >= (sim - reid_ambiguity_margin):
+                        return False, f"Ambiguous association: competitor pre-track has Re-ID sim {o_sim:.3f} vs top {sim:.3f}", sim
+
+            return True, "trajectory_reid_validated", sim
+
+        # If Re-ID is unavailable, do NOT guess on fragmented tracks by clothing/proximity alone
+        return False, "Appearance verification unavailable; cross-track linking rejected", None
+    except Exception as e:
+        return False, f"Association evaluation error: {str(e)}", None
+
+
+def rank_distinct_student_identities(
+    db_sids: List[Any],
+    sims: np.ndarray
+) -> Tuple[Optional[Any], float, Optional[Any], float, float]:
+    """
+    Phase F24.0A: Group gallery similarity scores by distinct student identity
+    and calculate top-to-runner-up margin between distinct identities.
+
+    1. Groups gallery similarity scores by distinct student identity (normalized by str(sid)).
+    2. Retains the maximum similarity score across each student's enrolled photos.
+    3. Ranks distinct identities descending by peak similarity.
+    4. Designates top identity as winner (best_sid, best_sim).
+    5. Designates highest-scoring DIFFERENT identity as runner-up (second_sid, second_sim).
+    6. Margin is calculated as best_sim - second_sim.
+
+    Policy for no valid competing identity:
+        If only one distinct identity exists in the gallery with valid scores,
+        second_sid is None, second_sim is 0.0, and margin is best_sim (uncontested match).
+
+    Returns:
+        (best_sid, best_sim, second_sid, second_sim, margin)
+    """
+    if db_sids is None or sims is None or len(db_sids) == 0 or len(sims) == 0:
+        return None, 0.0, None, 0.0, 0.0
+
+    student_max: Dict[str, Tuple[Any, float]] = {}
+    for sid, s_val in zip(db_sids, sims):
+        if sid is None:
+            continue
+        try:
+            val = float(s_val)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(val):
+            continue
+
+        sid_key = str(sid)
+        if sid_key not in student_max or val > student_max[sid_key][1]:
+            student_max[sid_key] = (sid, val)
+
+    if not student_max:
+        return None, 0.0, None, 0.0, 0.0
+
+    ranked = sorted(student_max.values(), key=lambda item: item[1], reverse=True)
+    best_sid, best_sim = ranked[0]
+
+    if len(ranked) > 1:
+        second_sid, second_sim = ranked[1]
+        margin = float(best_sim - second_sim)
+    else:
+        second_sid, second_sim = None, 0.0
+        margin = float(best_sim)
+
+    return best_sid, float(best_sim), second_sid, float(second_sim), margin
+
 
 @router.post("/analyze", response_model=ViolenceAnalysisResponse, status_code=status.HTTP_200_OK)
 async def analyze_video_for_violence(
@@ -622,7 +891,7 @@ async def analyze_video_for_violence(
 
         try:
             total_size = 0
-            max_size = settings.MAX_UPLOAD_SIZE_BYTES  # 500 MiB (524,288,000 bytes)
+            max_size = settings.MAX_UPLOAD_SIZE_BYTES
             with open(saved_path, "wb") as buffer:
                 while chunk := await file.read(1024 * 1024):
                     total_size += len(chunk)
@@ -632,7 +901,7 @@ async def analyze_video_for_violence(
                             os.remove(saved_path)
                         raise HTTPException(
                             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                            detail=f"Video file exceeds maximum 500 MiB size limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
+                            detail=f"Video file exceeds maximum {settings.max_upload_size_formatted} size limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
                         )
                     buffer.write(chunk)
         except HTTPException:
@@ -812,7 +1081,16 @@ async def analyze_video_for_violence(
             target_video.current_stage = "Analysis Completed - Normal Activity"
             target_video.progress_percentage = 100
             await db.commit()
-            return await _compile_violence_dossier(db, target_video, resolved_camera)
+
+            from app.services.targeted_verification import perform_targeted_fight_verification
+            targeted_verif = await perform_targeted_fight_verification(
+                db=db,
+                video_id=target_video.id,
+                video_filename=target_video.original_filename or target_video.filename or "CCTV_Video.mp4",
+                violence_segments=[],
+                valid_video_tracks={}
+            )
+            return await _compile_violence_dossier(db, target_video, resolved_camera, targeted_verification=targeted_verif)
 
         # Step 2: Violence Detected — Process ONLY detected violence segments downstream
         # Clean up any prior violence analysis records for this video to ensure idempotency on re-analysis
@@ -955,16 +1233,7 @@ async def analyze_video_for_violence(
                         if e_norm > 0:
                             emb_arr = emb_arr / e_norm
                             sims = np.dot(db_matrix, emb_arr)
-                    if len(sims) == 1:
-                        sim = float(sims[0])
-                        best_sid = db_sids[0]
-                    elif len(sims) > 1:
-                        top2_idx = np.argpartition(-sims, 1)[:2]
-                        top2_idx = top2_idx[np.argsort(-sims[top2_idx])]
-                        sim = float(sims[top2_idx[0]])
-                        best_sid = db_sids[top2_idx[0]]
-                        second_sim = float(sims[top2_idx[1]])
-                        second_sid = db_sids[top2_idx[1]]
+                            best_sid, sim, second_sid, second_sim, _ = rank_distinct_student_identities(db_sids, sims)
                 elif cand_path and os.path.exists(cand_path):
                     # 2. Fallback to StudentIdentifier if no precomputed embedding
                     try:
@@ -979,7 +1248,7 @@ async def analyze_video_for_violence(
 
                 # Reject ambiguous or low-quality faces (below threshold or overlapping top candidates)
                 if best_sid and sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
-                    if second_sid and second_sid != best_sid and second_sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
+                    if second_sid and str(second_sid) != str(best_sid) and second_sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
                         if (sim - second_sim) < 0.05:
                             logger.info(f"[VIOLENCE PIPELINE] Ambiguous candidate rejected on track {trk_id}: {best_sid} ({sim:.3f}) vs {second_sid} ({second_sim:.3f})")
                             continue
@@ -1006,6 +1275,61 @@ async def analyze_video_for_violence(
                                 **obs_entry,
                                 "track_id": trk_id
                             }
+
+            # If no confirmed student match from primary track observations, evaluate defensibly associated pre-incident tracks
+            if not student_obs_for_track:
+                pre_candidates = [
+                    (o_tid, o_trk) for o_tid, o_trk in valid_video_tracks.items()
+                    if o_tid != trk_id and o_trk.get("end_time", 0.0) <= trk_data.get("start_time", 0.0) + 0.15
+                ]
+                all_earlier_list = [o_trk for _, o_trk in pre_candidates]
+                for o_tid, o_trk in pre_candidates:
+                    is_assoc, method, reid_sim = validate_pre_incident_track_association(
+                        incident_track=trk_data,
+                        candidate_pre_track=o_trk,
+                        all_pre_tracks=all_earlier_list,
+                        incident_start_sec=trk_data.get("start_time", 0.0)
+                    )
+                    if is_assoc and o_trk.get("candidate_face_crops"):
+                        for pre_cand in o_trk["candidate_face_crops"]:
+                            pre_emb = pre_cand.get("embedding")
+                            pre_path = pre_cand.get("path")
+                            sim = 0.0
+                            best_sid = None
+                            second_sim = 0.0
+                            second_sid = None
+                            if pre_emb is not None and isinstance(pre_emb, list) and len(pre_emb) == 512 and db_matrix is not None and len(db_sids) > 0:
+                                emb_arr = np.array(pre_emb, dtype=np.float32)
+                                if np.all(np.isfinite(emb_arr)):
+                                    e_norm = np.linalg.norm(emb_arr)
+                                    if e_norm > 0:
+                                        emb_arr = emb_arr / e_norm
+                                        sims = np.dot(db_matrix, emb_arr)
+                                        best_sid, sim, second_sid, second_sim, _ = rank_distinct_student_identities(db_sids, sims)
+
+                            # Strict biometric safeguards
+                            if best_sid and sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
+                                if second_sid and str(second_sid) != str(best_sid) and second_sim >= settings.RECOGNITION_MEDIUM_THRESHOLD:
+                                    if (sim - second_sim) < 0.05:
+                                        continue
+                                s_obj = enrolled_students_map.get(best_sid)
+                                if s_obj:
+                                    obs_entry = {
+                                        "student": s_obj,
+                                        "similarity_score": sim,
+                                        "confidence": "high" if sim >= settings.RECOGNITION_HIGH_THRESHOLD else "medium",
+                                        "matched_crop_path": pre_path,
+                                        "frame": pre_cand.get("frame"),
+                                        "association_type": method,
+                                        "associated_from_track": o_tid
+                                    }
+                                    student_obs_for_track.setdefault(best_sid, []).append(obs_entry)
+                                    if best_sid not in incident_student_observations or sim > incident_student_observations[best_sid]["similarity_score"]:
+                                        incident_student_observations[best_sid] = {
+                                            **obs_entry,
+                                            "track_id": trk_id
+                                        }
+                                    logger.info(f"[VIOLENCE PIPELINE] Associated earlier observation from track {o_tid} to track {trk_id} for student {s_obj.name} ({sim:.3f})")
 
             trk_data["_student_obs"] = student_obs_for_track
 
@@ -1107,7 +1431,7 @@ async def analyze_video_for_violence(
 
             clip_filename = f"clip_x3d_{target_video.id.hex[:8]}_seg{seg_idx}.mp4"
             clip_path = os.path.join(settings.STORAGE_DIR, "evidence", clip_filename)
-            await run_in_threadpool(generate_subclip, target_video.file_path, seg_start_sec, seg.duration, clip_path)
+            await run_in_threadpool(generate_subclip, target_video.file_path, seg_start_sec, seg.duration, clip_path, video_duration)
             t_evidence_total += (time.time() - t_ev_start)
 
             # Database Persistence
@@ -1187,15 +1511,19 @@ async def analyze_video_for_violence(
                     )
                     db.add(db_track)
 
-                    for d in trk_data["detections"]:
-                        db.add(Detection(
+                    det_batch = [
+                        Detection(
                             id=uuid.uuid4(),
                             track_id=t_uuid,
                             frame_number=d["frame_number"],
                             timestamp_seconds=d["timestamp_seconds"],
                             bounding_box=d["bounding_box"],
                             confidence=d["confidence"]
-                        ))
+                        )
+                        for d in trk_data["detections"]
+                    ]
+                    if det_batch:
+                        db.add_all(det_batch)
 
                 # If track has a confirmed primary identity, associate with incident
                 if primary_info:
@@ -1293,7 +1621,15 @@ async def analyze_video_for_violence(
             except Exception as ex:
                 logger.warning(f"[VIOLENCE PIPELINE] Could not dispatch violence alert: {ex}")
 
-        return await _compile_violence_dossier(db, target_video, resolved_camera)
+        from app.services.targeted_verification import perform_targeted_fight_verification
+        targeted_verif = await perform_targeted_fight_verification(
+            db=db,
+            video_id=target_video.id,
+            video_filename=target_video.original_filename or target_video.filename or "CCTV_Video.mp4",
+            violence_segments=x3d_res.segments,
+            valid_video_tracks=valid_video_tracks
+        )
+        return await _compile_violence_dossier(db, target_video, resolved_camera, targeted_verification=targeted_verif)
     except Exception as exc:
         from app.tasks.video_tasks import is_video_cancelled
         if is_video_cancelled(target_video.id):
@@ -1330,7 +1666,8 @@ async def analyze_video_for_violence(
 async def _compile_violence_dossier(
     db: AsyncSession,
     target_video: Video,
-    resolved_camera: Optional[Camera]
+    resolved_camera: Optional[Camera],
+    targeted_verification: Optional[TargetedParticipantVerification] = None
 ) -> ViolenceAnalysisResponse:
     # Compile Violence Analysis Dossier from database Incidents & DetectedEvents
     inc_stmt = (
@@ -1799,6 +2136,31 @@ async def _compile_violence_dossier(
         else "Normal campus activity verified. No violence or aggressive physical altercations detected."
     )
 
+    if targeted_verification is None:
+        from app.services.targeted_verification import perform_targeted_fight_verification
+        db_tracks_map: Dict[int, Dict[str, Any]] = {}
+        for trk in all_video_tracks:
+            db_tracks_map[trk.tracker_id] = {
+                "start_time": trk.start_time,
+                "end_time": trk.end_time,
+                "best_crop_path": trk.key_frame_path,
+                "detections": [
+                    {
+                        "frame_number": d.frame_number,
+                        "timestamp_seconds": d.timestamp_seconds,
+                        "bounding_box": d.bounding_box,
+                        "confidence": d.confidence
+                    } for d in (trk.detections or [])
+                ]
+            }
+        targeted_verification = await perform_targeted_fight_verification(
+            db=db,
+            video_id=target_video.id,
+            video_filename=target_video.original_filename or target_video.filename or "CCTV_Video.mp4",
+            violence_segments=incidents,
+            valid_video_tracks=db_tracks_map
+        )
+
     cam = resolved_camera or target_video.camera
     return ViolenceAnalysisResponse(
         video_id=target_video.id,
@@ -1815,7 +2177,8 @@ async def _compile_violence_dossier(
         primary_evidence_video=primary_video,
         identified_students=list(all_identified_students_map.values()),
         incident_id=primary_incident_id,
-        analyzed_at=datetime.now(timezone.utc)
+        analyzed_at=datetime.now(timezone.utc),
+        targeted_verification=targeted_verification
     )
 
 @router.get("/status/{video_id}")
@@ -2083,6 +2446,19 @@ async def generate_violence_report(
         "generated_by": current_user.full_name or current_user.email,
         "generated_at": datetime.now(timezone.utc).isoformat()
     }
+
+    # Add targeted participant verification to report data
+    from app.services.targeted_verification import perform_targeted_fight_verification
+    targeted_rep_verif = await perform_targeted_fight_verification(
+        db=db,
+        video_id=target_video.id if target_video else (video_id or uuid.uuid4()),
+        video_filename=target_video.original_filename or (target_video.filename if target_video else "CCTV_Video.mp4"),
+        violence_segments=[inc] if inc else [],
+        valid_video_tracks={}
+    )
+    report_data["targeted_participant_verification"] = (
+        targeted_rep_verif.model_dump() if hasattr(targeted_rep_verif, "model_dump") else targeted_rep_verif.dict()
+    )
 
     # Check for existing report for this incident
     stmt = select(Report).filter(Report.incident_id == inc.id)

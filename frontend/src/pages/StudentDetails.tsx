@@ -12,20 +12,31 @@ export const StudentDetails: React.FC = () => {
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
   const [photoView, setPhotoView] = useState('front');
 
-  const { data: student, isLoading: isStudentLoading } = useQuery({
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const { data: student, isLoading: isStudentLoading, isError: isStudentError } = useQuery({
     queryKey: ['student', id],
     queryFn: async () => {
       const res = await api.get(`/students/${id}`);
       return res.data;
+    },
+    retry: (failureCount, error: any) => {
+      const status = error?.response?.status || error?.status;
+      if (status >= 400 && status < 500) return false;
+      return failureCount < 1;
     }
   });
+
+  const isStudentReady = Boolean(student && !isStudentError && id);
 
   const { data: photos } = useQuery({
     queryKey: ['student-photos', id],
     queryFn: async () => {
       const res = await api.get(`/students/${id}/photos`);
       return res.data;
-    }
+    },
+    enabled: isStudentReady,
+    retry: false
   });
 
   const { data: statusData, refetch: refetchStatus } = useQuery({
@@ -33,7 +44,9 @@ export const StudentDetails: React.FC = () => {
     queryFn: async () => {
       const res = await api.get(`/students/${id}/enrollment-status`);
       return res.data;
-    }
+    },
+    enabled: isStudentReady,
+    retry: false
   });
 
   const { data: appearances } = useQuery({
@@ -41,7 +54,9 @@ export const StudentDetails: React.FC = () => {
     queryFn: async () => {
       const res = await api.get(`/students/${id}/appearances`);
       return res.data;
-    }
+    },
+    enabled: isStudentReady,
+    retry: false
   });
 
   const uploadMutation = useMutation({
@@ -101,15 +116,49 @@ export const StudentDetails: React.FC = () => {
 
   const deleteStudentMutation = useMutation({
     mutationFn: async () => {
+      setDeleteError(null);
       await api.delete(`/students/${id}`);
+      return id;
+    },
+    retry: false,
+    onMutate: async () => {
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: ['student', id] }),
+        queryClient.cancelQueries({ queryKey: ['student-photos', id] }),
+        queryClient.cancelQueries({ queryKey: ['student-enrollment-status', id] }),
+        queryClient.cancelQueries({ queryKey: ['student-appearances', id] }),
+      ]);
     },
     onSuccess: () => {
       setIsStudentDeleteModalOpen(false);
-      alert('Student record and assets deleted successfully!');
-      navigate('/students');
+      queryClient.removeQueries({ queryKey: ['student', id] });
+      queryClient.removeQueries({ queryKey: ['student-photos', id] });
+      queryClient.removeQueries({ queryKey: ['student-enrollment-status', id] });
+      queryClient.removeQueries({ queryKey: ['student-appearances', id] });
+
+      queryClient.setQueriesData({ queryKey: ['students-list'] }, (old: any) => {
+        if (!old) return old;
+        if (Array.isArray(old)) {
+          return old.filter((s: any) => s.id !== id);
+        }
+        if (old.items && Array.isArray(old.items)) {
+          return {
+            ...old,
+            total: Math.max(0, (old.total || 1) - 1),
+            items: old.items.filter((s: any) => s.id !== id),
+          };
+        }
+        return old;
+      });
+
+      queryClient.invalidateQueries({ queryKey: ['students-list'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
+      navigate('/students', { replace: true });
     },
     onError: (err: any) => {
-      alert(`Failed to delete student: ${err.response?.data?.detail || err.message}`);
+      const msg = err.response?.data?.detail || err.message || 'Failed to delete student.';
+      setDeleteError(msg);
+      setIsStudentDeleteModalOpen(false);
     }
   });
 
@@ -121,11 +170,43 @@ export const StudentDetails: React.FC = () => {
     );
   }
 
+  if (isStudentError) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center text-slate-600 h-96 space-y-4">
+        <AlertCircle className="h-12 w-12 text-rose-500" />
+        <h3 className="text-lg font-bold text-slate-900">Student Profile Not Found</h3>
+        <p className="text-sm text-slate-500 max-w-md text-center">
+          The requested student record does not exist or has been deleted.
+        </p>
+        <button
+          onClick={() => navigate('/students', { replace: true })}
+          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition shadow-sm"
+        >
+          Return to Student Directory
+        </button>
+      </div>
+    );
+  }
+
   const enrolledViews = statusData?.enrolled_views || [];
   const missingViews = statusData?.missing_views || [];
 
   return (
     <div className="space-y-8 py-2">
+      {deleteError && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm flex items-center justify-between shadow-xs">
+          <div className="flex items-center space-x-2">
+            <span className="font-medium">{deleteError}</span>
+          </div>
+          <button
+            onClick={() => setDeleteError(null)}
+            className="text-rose-600 hover:text-rose-800 text-xs font-semibold px-2 py-1 rounded-md hover:bg-rose-100 transition"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* Header Profile Summary */}
       <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="flex items-center space-x-5">
@@ -169,10 +250,11 @@ export const StudentDetails: React.FC = () => {
           
           <button
             onClick={() => setIsStudentDeleteModalOpen(true)}
-            className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-xl font-semibold transition text-sm shadow-sm"
+            disabled={deleteStudentMutation.isPending}
+            className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white px-5 py-2.5 rounded-xl font-semibold transition text-sm shadow-sm"
           >
             <Trash2 className="h-4 w-4" />
-            <span>Delete Student</span>
+            <span>{deleteStudentMutation.isPending ? 'Deleting...' : 'Delete Student'}</span>
           </button>
         </div>
       </div>
@@ -351,8 +433,16 @@ export const StudentDetails: React.FC = () => {
 
       <DeleteConfirmationModal
         isOpen={isStudentDeleteModalOpen}
-        onClose={() => setIsStudentDeleteModalOpen(false)}
-        onConfirm={() => deleteStudentMutation.mutate()}
+        onClose={() => {
+          if (!deleteStudentMutation.isPending) {
+            setIsStudentDeleteModalOpen(false);
+          }
+        }}
+        onConfirm={() => {
+          if (!deleteStudentMutation.isPending) {
+            deleteStudentMutation.mutate();
+          }
+        }}
         title="Delete Student Record"
         message="Deleting this student will remove all face embeddings, recognition occurrences, photos, and timelines. Continue?"
         isLoading={deleteStudentMutation.isPending}

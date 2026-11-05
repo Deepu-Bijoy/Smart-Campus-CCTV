@@ -207,10 +207,25 @@ def test_invalid_video_unsupported_extension(operator_headers):
     assert "unsupported" in res.json()["detail"].lower()
 
 def test_invalid_video_oversized_file(operator_headers):
-    """Uploading file >100MB is rejected with 413."""
+    """Uploading file exceeding MAX_UPLOAD_SIZE_BYTES is rejected with 413."""
+    from app.core.config import settings
+
+    class ChunkedOversizedStream:
+        def __init__(self, target_size: int):
+            self.target_size = target_size
+            self.bytes_read = 0
+            self.chunk = b"0" * (1024 * 1024)
+        def read(self, size=-1):
+            if self.bytes_read >= self.target_size:
+                return b""
+            rem = self.target_size - self.bytes_read
+            take = min(len(self.chunk), rem)
+            self.bytes_read += take
+            return self.chunk[:take]
+
     res = client.post(
         "/api/v1/violence/upload",
-        files={"file": ("too_large.mp4", b"0" * (100 * 1024 * 1024 + 1024), "video/mp4")},
+        files={"file": ("too_large.mp4", ChunkedOversizedStream(settings.MAX_UPLOAD_SIZE_BYTES + 1024), "video/mp4")},
         headers=operator_headers
     )
     assert res.status_code == 413

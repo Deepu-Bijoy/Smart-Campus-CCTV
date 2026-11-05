@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 class QdrantVectorStore:
     _in_memory_client = None
+    _collections_ensured = set()
 
     def __init__(self):
         import os
@@ -23,11 +24,24 @@ class QdrantVectorStore:
                 # we specify path to store SQLite/Qdrant databases on disk
                 db_path = os.path.join(settings.STORAGE_DIR, "qdrant_db")
                 os.makedirs(db_path, exist_ok=True)
-                try:
-                    QdrantVectorStore._in_memory_client = QdrantClient(path=db_path)
-                except Exception as q_lock_err:
-                    logger.warning(f"Qdrant storage folder locked by another process ({q_lock_err}), falling back to in-memory client.")
+                lock_file = os.path.join(db_path, ".lock")
+                is_locked = False
+                if os.path.exists(lock_file):
+                    try:
+                        with open(lock_file, "r+"):
+                            pass
+                    except (IOError, PermissionError, OSError):
+                        is_locked = True
+
+                if is_locked:
+                    logger.info("Qdrant storage folder locked by another process, instantly using in-memory client.")
                     QdrantVectorStore._in_memory_client = QdrantClient(":memory:")
+                else:
+                    try:
+                        QdrantVectorStore._in_memory_client = QdrantClient(path=db_path)
+                    except Exception as q_lock_err:
+                        logger.warning(f"Qdrant storage folder locked by another process ({q_lock_err}), falling back to in-memory client.")
+                        QdrantVectorStore._in_memory_client = QdrantClient(":memory:")
             self.client = QdrantVectorStore._in_memory_client
             logger.info("Initializing shared local persistent QdrantClient.")
         else:
@@ -41,6 +55,9 @@ class QdrantVectorStore:
         self._ensure_collection_exists()
 
     def _ensure_collection_exists(self) -> None:
+        client_key = id(self.client)
+        if client_key in QdrantVectorStore._collections_ensured:
+            return
         try:
             collections = self.client.get_collections().collections
             
@@ -67,6 +84,7 @@ class QdrantVectorStore:
                     )
                 )
                 logger.info(f"Created Qdrant collection: {self.face_collection_name}")
+            QdrantVectorStore._collections_ensured.add(client_key)
         except Exception as e:
             logger.error(f"Error ensuring Qdrant collections exist: {str(e)}")
 

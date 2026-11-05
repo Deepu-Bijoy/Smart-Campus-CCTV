@@ -14,7 +14,8 @@ import {
   Trash2,
   ExternalLink,
   Film,
-  Camera as CameraIcon
+  Camera as CameraIcon,
+  CameraOff
 } from 'lucide-react';
 import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 import { AuthenticatedImage } from '../components/AuthenticatedImage';
@@ -107,12 +108,13 @@ export const Search: React.FC = () => {
       for (const res of rawResults) {
         const student = res.student || (res.students && res.students[0]);
         const studentId = student?.id || student?.student_id;
-        const vid = res.source_video || res.video_id || 'unknown_video';
+        const vid = res.video_id || res.source_video || 'unknown_video';
         const cam = res.camera_name || res.camera || 'unknown_cam';
+        const trackId = res.track_id || res.id || '';
 
         if (studentId) {
-          // Verified student: deduplicate within same source video and camera
-          const key = `student_${studentId}_${vid}_${cam}`;
+          // Keep distinct tracks/timestamps distinct; if same track repeated, keep earliest
+          const key = `student_${studentId}_${vid}_${cam}_${trackId}`;
           if (personGrouped.has(key)) {
             const existing = personGrouped.get(key);
             const existingTime = existing.first_detection_timestamp || existing.detected_at || existing.timestamp || '';
@@ -125,7 +127,7 @@ export const Search: React.FC = () => {
           }
         } else {
           // Unknown person: preserve separate tracks/identities
-          const trackKey = `track_${res.track_id || res.id || Math.random()}_${vid}_${cam}`;
+          const trackKey = `track_${trackId}_${vid}_${cam}`;
           personGrouped.set(trackKey, res);
         }
       }
@@ -401,17 +403,19 @@ export const Search: React.FC = () => {
                       {/* Evidence Screenshot Thumbnail & View Incident Button */}
                       <div className="flex items-center justify-between pt-2 border-t border-slate-100 gap-3">
                         <div className="flex items-center space-x-2">
-                          {res.evidence?.image ? (
+                          {res.evidence?.image || res.evidence?.person_crop ? (
                             <div className="flex items-center space-x-2">
-                              <div className="w-12 h-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-900 flex-shrink-0">
+                              <div className="w-12 h-10 rounded-lg overflow-hidden border border-slate-200 bg-slate-100 flex-shrink-0 flex items-center justify-center">
                                 <AuthenticatedImage
-                                  src={res.evidence.image}
+                                  src={res.evidence.image || res.evidence.person_crop}
                                   alt="Evidence thumbnail"
-                                  className="w-full h-full object-cover"
+                                  className="w-full h-full object-contain"
                                   fallbackIcon={<Eye className="h-4 w-4 text-slate-400 m-auto" />}
                                 />
                               </div>
-                              <span className="text-[11px] text-slate-500 font-medium">Keyframe Evidence</span>
+                              <span className="text-[11px] text-slate-500 font-medium">
+                                {res.evidence.image ? 'Full Evidence' : 'Person Crop'}
+                              </span>
                             </div>
                           ) : (
                             <span className="text-[11px] text-slate-400">No screenshot thumbnail</span>
@@ -428,7 +432,7 @@ export const Search: React.FC = () => {
                             <ChevronDown className={`h-3 w-3 transition-transform ${showDiag ? 'rotate-180' : ''}`} />
                           </button>
 
-                          {(res.incident_id || res.id) && (
+                          {(res.incident_id || (!['Student Identified', 'Appearance Match'].includes(res.incident_type) && typeof res.id === 'string' && !res.id.startsWith('identity_') && !res.id.startsWith('appearance_') && res.id)) && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -499,7 +503,7 @@ export const Search: React.FC = () => {
                     )}
                   </span>
                 </div>
-                {(selectedResult.incident_id || selectedResult.id) && (
+                {(selectedResult.incident_id || (!['Student Identified', 'Appearance Match'].includes(selectedResult.incident_type) && typeof selectedResult.id === 'string' && !selectedResult.id.startsWith('identity_') && !selectedResult.id.startsWith('appearance_') && selectedResult.id)) && (
                   <button
                     type="button"
                     onClick={() => navigate(`/events/${selectedResult.incident_id || selectedResult.id}`)}
@@ -652,40 +656,86 @@ export const Search: React.FC = () => {
                 )}
               </div>
 
-              {/* Evidence Screenshot (Video player removed as requested in F5.2) */}
-              {selectedResult.evidence?.image && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase font-mono">
-                    <div className="flex items-center space-x-1">
-                      <Eye className="h-3 w-3" />
-                      <span>Evidence Screenshot</span>
-                    </div>
-                    {selectedResult.evidence.image_id && (
-                      <button
-                        onClick={() => {
-                          setEvidenceToDeleteId(selectedResult.evidence.image_id);
-                          setIsEvidenceDeleteModalOpen(true);
-                        }}
-                        className="text-red-600 hover:text-red-700 transition flex items-center space-x-1 font-semibold"
-                        title="Delete Screenshot"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                        <span>Delete</span>
-                      </button>
-                    )}
+              {/* Evidence Screenshot & Person Crop Presentation */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-[10px] font-bold text-slate-500 uppercase font-mono">
+                  <div className="flex items-center space-x-1.5">
+                    <Eye className="h-3.5 w-3.5 text-blue-600" />
+                    <span>Evidence Screenshot</span>
+                    {selectedResult.evidence?.is_nearby ? (
+                      <span className="text-[9px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200 font-semibold normal-case">
+                        Nearby Frame
+                      </span>
+                    ) : selectedResult.evidence?.image ? (
+                      <span className="text-[9px] text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 font-semibold normal-case">
+                        Verified Detection Frame
+                      </span>
+                    ) : null}
                   </div>
-                  <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-950 flex justify-center">
+                  {selectedResult.evidence?.image_id && (
+                    <button
+                      onClick={() => {
+                        setEvidenceToDeleteId(selectedResult.evidence.image_id);
+                        setIsEvidenceDeleteModalOpen(true);
+                      }}
+                      className="text-red-600 hover:text-red-700 transition flex items-center space-x-1 font-semibold"
+                      title="Delete Screenshot"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      <span>Delete</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Full Evidence Frame Container */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden bg-slate-900/5 min-h-[220px] max-h-72 flex items-center justify-center p-2">
+                  {selectedResult.evidence?.image ? (
                     <AuthenticatedImage
                       src={selectedResult.evidence.image}
                       alt="Incident Evidence Screenshot"
-                      className="max-h-64 object-contain"
+                      className="max-h-64 w-auto max-w-full object-contain rounded-lg shadow-2xs"
+                      fallbackIcon={
+                        <div className="flex flex-col items-center justify-center text-slate-400 p-6 space-y-1.5 text-center">
+                          <CameraOff className="h-8 w-8 text-slate-300 mx-auto" />
+                          <span className="text-xs font-semibold text-slate-600">Evidence unavailable</span>
+                          <span className="text-[10px] text-slate-400">File not found or unreadable</span>
+                        </div>
+                      }
                     />
-                  </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center text-slate-400 p-8 space-y-1.5 text-center">
+                      <CameraOff className="h-8 w-8 text-slate-300 mx-auto" />
+                      <span className="text-xs font-semibold text-slate-600">Evidence unavailable</span>
+                      <span className="text-[10px] text-slate-400">No evidence screenshot recorded for this detection</span>
+                    </div>
+                  )}
                 </div>
-              )}
+
+                {/* Separate Companion Person Crop if Available */}
+                {selectedResult.evidence?.person_crop && (
+                  <div className="flex items-center space-x-3 bg-slate-50 border border-slate-200 p-2.5 rounded-xl">
+                    <div className="w-12 h-14 rounded-lg overflow-hidden border border-slate-200 bg-white flex-shrink-0 flex items-center justify-center">
+                      <AuthenticatedImage
+                        src={selectedResult.evidence.person_crop}
+                        alt="Detected Person Crop"
+                        className="w-full h-full object-contain"
+                        fallbackIcon={<User className="h-5 w-5 text-slate-300" />}
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block font-mono">
+                        Person Crop
+                      </span>
+                      <span className="text-xs text-slate-700 font-medium">
+                        Cropped detection view of the subject
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
 
               {/* View Incident Link Button */}
-              {(selectedResult.incident_id || selectedResult.id) && (
+              {(selectedResult.incident_id || (!['Student Identified', 'Appearance Match'].includes(selectedResult.incident_type) && typeof selectedResult.id === 'string' && !selectedResult.id.startsWith('identity_') && !selectedResult.id.startsWith('appearance_') && selectedResult.id)) && (
                 <div className="pt-2">
                   <button
                     type="button"

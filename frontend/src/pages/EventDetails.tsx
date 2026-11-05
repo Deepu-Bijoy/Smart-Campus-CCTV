@@ -59,6 +59,22 @@ export const EventDetails: React.FC = () => {
       return response.data;
     },
     staleTime: 30000,
+    retry: (failureCount, err: any) => {
+      // Prevent repeated automatic retries for a confirmed 404
+      if (err?.response?.status === 404) {
+        return false;
+      }
+      // Allow up to 2 retries for transient network failures or server errors
+      return failureCount < 2;
+    },
+    refetchOnWindowFocus: (query) => {
+      // Do not refetch on window focus if confirmed 404
+      if ((query.state.error as any)?.response?.status === 404) {
+        return false;
+      }
+      return true;
+    },
+    refetchInterval: false,
   });
 
   // Fetch video details to resolve filename if video_id is present
@@ -111,6 +127,8 @@ export const EventDetails: React.FC = () => {
     }
   };
 
+  const is404 = (error as any)?.response?.status === 404;
+
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-400 h-96">
@@ -124,21 +142,30 @@ export const EventDetails: React.FC = () => {
 
   if (isError || (!event && !isLoading)) {
     return (
-      <div className="max-w-5xl mx-auto py-12 px-4 flex flex-col items-center justify-center text-slate-600 h-96 space-y-4">
-        <p className="text-rose-600 font-medium">Failed to load security alert details</p>
-        <p className="text-xs text-slate-400 max-w-md text-center">
-          {(error as any)?.response?.data?.detail || (error as any)?.message || 'The requested alert could not be found or a network error occurred.'}
+      <div className="max-w-5xl mx-auto py-16 px-4 flex flex-col items-center justify-center text-slate-600 h-96 space-y-4">
+        <div className="w-12 h-12 rounded-full bg-rose-50 border border-rose-200 flex items-center justify-center text-rose-600 mb-1">
+          <AlertTriangle className="h-6 w-6" />
+        </div>
+        <h2 className="text-lg font-bold text-slate-800">
+          {is404 ? 'Security Alert Not Found' : 'Failed to Load Alert Details'}
+        </h2>
+        <p className="text-xs text-slate-500 max-w-md text-center leading-relaxed">
+          {is404
+            ? 'The requested security alert event does not exist, has been removed, or the link is invalid.'
+            : ((error as any)?.response?.data?.detail || (error as any)?.message || 'A network error occurred while loading alert records.')}
         </p>
-        <div className="flex items-center space-x-3">
-          <button
-            onClick={() => refetch()}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-semibold transition shadow-sm"
-          >
-            Retry
-          </button>
+        <div className="flex items-center space-x-3 pt-2">
+          {!is404 && (
+            <button
+              onClick={() => refetch()}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold transition shadow-xs"
+            >
+              Retry
+            </button>
+          )}
           <button
             onClick={() => navigate('/events')}
-            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold transition"
+            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold transition shadow-xs"
           >
             Back to Alerts
           </button>

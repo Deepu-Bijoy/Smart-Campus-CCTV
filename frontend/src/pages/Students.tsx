@@ -6,6 +6,7 @@ import { StudentCard } from '../components/StudentCard';
 import type { StudentData } from '../components/StudentCard';
 import { Plus, X, Loader2, ArrowLeft, ArrowRight } from 'lucide-react';
 import { useForm } from 'react-hook-form';
+import { DeleteConfirmationModal } from '../components/DeleteConfirmationModal';
 
 export const Students: React.FC = () => {
   const queryClient = useQueryClient();
@@ -13,6 +14,9 @@ export const Students: React.FC = () => {
   const [page, setPage] = useState(1);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
+  const [studentToDelete, setStudentToDelete] = useState<StudentData | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const { register, handleSubmit, reset, formState: { errors } } = useForm();
   const limit = 6;
 
@@ -33,6 +37,52 @@ export const Students: React.FC = () => {
     }
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: async (id: string) => {
+      setDeleteError(null);
+      await api.delete(`/students/${id}`);
+      return id;
+    },
+    retry: false,
+    onMutate: async (id: string) => {
+      await queryClient.cancelQueries({ queryKey: ['students-list'] });
+      const previousData = queryClient.getQueryData(['students-list', searchQuery, page]);
+
+      queryClient.setQueriesData({ queryKey: ['students-list'] }, (old: any) => {
+        if (!old) return old;
+        if (Array.isArray(old)) {
+          return old.filter((s: any) => s.id !== id);
+        }
+        if (old.items && Array.isArray(old.items)) {
+          return {
+            ...old,
+            total: Math.max(0, (old.total || 1) - 1),
+            items: old.items.filter((s: any) => s.id !== id),
+          };
+        }
+        return old;
+      });
+
+      return { previousData };
+    },
+    onSuccess: () => {
+      setIsDeleteModalOpen(false);
+      setStudentToDelete(null);
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ['students-list'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
+    },
+    onError: (err: any, _id: string, context: any) => {
+      if (context?.previousData) {
+        queryClient.setQueryData(['students-list', searchQuery, page], context.previousData);
+      }
+      const msg = err.response?.data?.detail || err.message || 'Failed to delete student.';
+      setDeleteError(msg);
+      setIsDeleteModalOpen(false);
+      setStudentToDelete(null);
+    }
+  });
+
   const registerMutation = useMutation({
     mutationFn: async (studentData: any) => {
       const response = await api.post('/students', studentData);
@@ -40,6 +90,7 @@ export const Students: React.FC = () => {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['students-list'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] });
       setIsModalOpen(false);
       setFormError(null);
       reset();
@@ -70,6 +121,20 @@ export const Students: React.FC = () => {
 
   return (
     <div className="space-y-8 py-2">
+      {deleteError && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-sm flex items-center justify-between shadow-xs">
+          <div className="flex items-center space-x-2">
+            <span className="font-medium">{deleteError}</span>
+          </div>
+          <button
+            onClick={() => setDeleteError(null)}
+            className="text-rose-600 hover:text-rose-800 text-xs font-semibold px-2 py-1 rounded-md hover:bg-rose-100 transition"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-slate-900">Student Directory</h2>
@@ -105,7 +170,14 @@ export const Students: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {items.length > 0 ? (
               items.map((student) => (
-                <StudentCard key={student.id} student={student} />
+                <StudentCard
+                  key={student.id}
+                  student={student}
+                  onDelete={(s) => {
+                    setStudentToDelete(s);
+                    setIsDeleteModalOpen(true);
+                  }}
+                />
               ))
             ) : (
               <div className="col-span-full text-center py-12 text-slate-500 text-sm bg-white border border-slate-200 rounded-2xl shadow-sm">
@@ -270,6 +342,25 @@ export const Students: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Delete Confirmation Modal */}
+      <DeleteConfirmationModal
+        isOpen={isDeleteModalOpen}
+        onClose={() => {
+          if (!deleteMutation.isPending) {
+            setIsDeleteModalOpen(false);
+            setStudentToDelete(null);
+          }
+        }}
+        onConfirm={() => {
+          if (studentToDelete && !deleteMutation.isPending) {
+            deleteMutation.mutate(studentToDelete.id);
+          }
+        }}
+        title="Delete Student Record"
+        message={`Are you sure you want to delete "${studentToDelete?.name || 'this student'}"? Deleting this student will remove all face embeddings, recognition occurrences, photos, and timelines. Continue?`}
+        isLoading={deleteMutation.isPending}
+      />
     </div>
   );
 };

@@ -9,6 +9,7 @@ export const NotificationPanel: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
   const [filter, setFilter] = useState('all');
   const [toasts, setToasts] = useState<any[]>([]);
+  const [isWsConnected, setIsWsConnected] = useState(false);
 
   const { data: notifications = [] } = useQuery({
     queryKey: ['notifications-list'],
@@ -16,7 +17,7 @@ export const NotificationPanel: React.FC = () => {
       const response = await api.get('/notifications');
       return response.data || [];
     },
-    refetchInterval: 10000
+    refetchInterval: isWsConnected ? false : 30000
   });
 
   const readMutation = useMutation({
@@ -51,14 +52,33 @@ export const NotificationPanel: React.FC = () => {
 
   const token = useAuthStore((state) => state.token);
 
+  // Helper to check if a JWT token is structurally valid and unexpired
+  const isTokenExpired = (jwtToken: string | null): boolean => {
+    if (!jwtToken) return true;
+    try {
+      const parts = jwtToken.split('.');
+      if (parts.length !== 3) return true;
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (!payload.exp) return false;
+      // Consider expired if within 5 seconds of expiration
+      return Date.now() >= payload.exp * 1000 - 5000;
+    } catch {
+      return true;
+    }
+  };
+
   useEffect(() => {
-    if (!token) return;
+    if (!token || isTokenExpired(token)) {
+      setIsWsConnected(false);
+      return;
+    }
 
     let ws: WebSocket | null = null;
     let isMounted = true;
     let reconnectTimeout: any = null;
     let pingInterval: any = null;
     let backoffDelay = 2000;
+    let consecutiveFailures = 0;
     const maxBackoff = 30000;
 
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -69,11 +89,27 @@ export const NotificationPanel: React.FC = () => {
 
     const connectWebSocket = () => {
       if (!isMounted) return;
+      if (isTokenExpired(token)) {
+        console.warn('Notification WebSocket: Token expired. Stopping reconnect.');
+        setIsWsConnected(false);
+        return;
+      }
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
       try {
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
+          if (!isMounted) {
+            ws?.close();
+            return;
+          }
+          setIsWsConnected(true);
           backoffDelay = 2000;
+          consecutiveFailures = 0;
+
+          if (pingInterval) clearInterval(pingInterval);
           pingInterval = setInterval(() => {
             if (ws && ws.readyState === WebSocket.OPEN) {
               try {
@@ -108,18 +144,50 @@ export const NotificationPanel: React.FC = () => {
         };
 
         ws.onclose = (event) => {
+          setIsWsConnected(false);
           if (pingInterval) {
             clearInterval(pingInterval);
             pingInterval = null;
           }
           if (!isMounted) return;
-          if (event.code === 1008) {
-            // Policy violation / rate limit: increase backoff
-            backoffDelay = Math.min(backoffDelay * 2, maxBackoff);
+
+          // 4401: Unauthorized / expired token; 4403: Forbidden role
+          // Permanent auth failure: do not reconnect until credentials refresh.
+          if (event.code === 4401 || event.code === 4403) {
+            console.warn(`Notification WebSocket auth rejected (code ${event.code}). Halting reconnection until token renewal.`);
+            return;
           }
+
+          if (isTokenExpired(token)) {
+            console.warn('Notification WebSocket: Token has expired. Halting reconnection.');
+            return;
+          }
+
+          consecutiveFailures++;
+
+          // Bounded exponential backoff with jitter
+          if (event.code === 4429) {
+            // Backend rate limited: aggressive backoff
+            backoffDelay = Math.min(maxBackoff, 10000 * Math.pow(1.5, Math.min(consecutiveFailures, 4)));
+          } else if (event.code === 1008) {
+            // Policy violation
+            backoffDelay = Math.min(maxBackoff, backoffDelay * 2);
+          } else {
+            // Network drops, server restart (e.g. 1006)
+            backoffDelay = Math.min(maxBackoff, Math.max(2000, backoffDelay * 1.5));
+          }
+
+          if (consecutiveFailures > 8) {
+            backoffDelay = maxBackoff;
+          }
+
+          // Add jitter (0 - 1500ms) to prevent thundering herd reconnection storms
+          const jitter = Math.random() * 1500;
+          const nextDelay = Math.min(maxBackoff, backoffDelay + jitter);
+
           reconnectTimeout = setTimeout(() => {
             if (isMounted) connectWebSocket();
-          }, backoffDelay);
+          }, nextDelay);
         };
 
         ws.onerror = () => {
@@ -134,14 +202,24 @@ export const NotificationPanel: React.FC = () => {
 
     return () => {
       isMounted = false;
-      if (reconnectTimeout) clearTimeout(reconnectTimeout);
-      if (pingInterval) clearInterval(pingInterval);
+      setIsWsConnected(false);
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      if (pingInterval) {
+        clearInterval(pingInterval);
+        pingInterval = null;
+      }
       if (ws) {
         ws.onclose = null;
         ws.onerror = null;
+        ws.onopen = null;
+        ws.onmessage = null;
         if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
           ws.close();
         }
+        ws = null;
       }
     };
   }, [token, queryClient]);

@@ -7,12 +7,13 @@ from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import or_, desc, asc, func
+from sqlalchemy import or_, desc, asc, func, text
 
 from app.api import deps
 from app.models.user import User
 from app.models.student import Student, StudentPhoto, StudentFaceSession
 from app.models.face_embedding import StudentFaceEmbedding
+from app.models.video import Video
 from app.pipeline.face_engine import FaceEnrollmentEngine
 from app.services.vector_store import QdrantVectorStore
 from app.schemas.student import (
@@ -22,7 +23,16 @@ from app.schemas.student import (
     StudentListResponse,
     StudentPhotoResponse,
     EnrollmentSummaryResponse,
-    EnrollmentStatusResponse
+    EnrollmentStatusResponse,
+    SameVideoEnrollRequest,
+    SameVideoEnrollResponse,
+    ControlledDiagnosticResponse,
+    SameVideoMatchReport
+)
+from app.services.same_video_face import (
+    extract_enrollment_image_from_video,
+    run_controlled_source_diagnostic,
+    verify_same_video_face_match
 )
 
 logger = logging.getLogger(__name__)
@@ -191,34 +201,72 @@ async def delete_student(
     current_user: User = Depends(deps.get_current_user)
 ) -> None:
     """
-    Delete a student record and remove all physical photo attachments from disk.
+    Delete a student record, clean up related database references and face embeddings,
+    and remove all physical photo attachments from disk.
     """
-    result = await db.execute(select(Student).filter(Student.id == id))
+    id_str = str(id)
+    id_hex = id.hex if hasattr(id, "hex") else id_str.replace("-", "")
+
+    result = await db.execute(
+        select(Student).filter(
+            (Student.id == id) | (Student.id == id_str) | (Student.id == id_hex)
+        )
+    )
     student = result.scalars().first()
     if not student:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Student with ID {id} not found."
         )
-        
+
+    # Relational cleanups before removing student record
+    await db.execute(
+        text("DELETE FROM student_recognition_events WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("DELETE FROM student_face_embeddings WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("UPDATE tracks SET identified_student_id = NULL WHERE identified_student_id = :sid OR identified_student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("UPDATE events SET student_id = NULL WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("UPDATE reports SET student_id = NULL WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("DELETE FROM incident_persons WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("DELETE FROM student_photos WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("DELETE FROM student_face_sessions WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+    await db.execute(
+        text("DELETE FROM students WHERE id = :sid OR id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+    )
+
+    await db.commit()
+    db.expire_all()
+
     # Cleanup physical storage folder
-    student_dir = os.path.join("storage", "students", str(id))
+    student_dir = os.path.join("storage", "students", id_str)
     if os.path.exists(student_dir):
         try:
-            shutil.rmtree(student_dir)
+            shutil.rmtree(student_dir, ignore_errors=True)
             logger.info(f"Removed student photos storage path: {student_dir}")
         except Exception as e:
             logger.error(f"Failed to remove storage directory {student_dir}: {str(e)}")
-            
+
     # Cleanup Qdrant vectors
     try:
         qdrant_store = QdrantVectorStore()
         qdrant_store.delete_face_embeddings_by_student(id)
     except Exception as qe:
         logger.error(f"Failed to clean up Qdrant vectors for student {id}: {str(qe)}")
-            
-    await db.delete(student)
-    await db.commit()
+
     return
 
 @router.post("/{id}/photos", response_model=List[StudentPhotoResponse], status_code=status.HTTP_201_CREATED)
@@ -226,11 +274,15 @@ async def upload_student_photos(
     id: uuid.UUID,
     files: List[UploadFile] = File(...),
     views: Optional[List[str]] = Form(None),
+    video_id: Optional[str] = Form(None),
+    timestamp_seconds: Optional[float] = Form(None),
+    frame_idx: Optional[int] = Form(None),
     db: AsyncSession = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_user)
 ) -> Any:
     """
-    Upload photos of the student captured from different angles.
+    Upload photos of the student captured from different angles or extracted from CCTV footage.
+    Preserves original video identifier and timestamp metadata when available.
     """
     # 1. Validate student existence
     result = await db.execute(select(Student).filter(Student.id == id))
@@ -308,7 +360,18 @@ async def upload_student_photos(
         with open(photo_path, "wb") as f_out:
             f_out.write(content)
             
-        # Create database record
+        # Create database record with source video metadata preservation
+        meta = {"original_filename": file.filename}
+        if video_id:
+            meta["video_id"] = str(video_id)
+            meta["video_identifier"] = str(video_id)
+            meta["source"] = "cctv_video"
+        if timestamp_seconds is not None:
+            meta["timestamp"] = float(timestamp_seconds)
+            meta["timestamp_seconds"] = float(timestamp_seconds)
+        if frame_idx is not None:
+            meta["frame_idx"] = int(frame_idx)
+
         db_photo = StudentPhoto(
             student_id=id,
             photo_path=photo_path,
@@ -316,7 +379,7 @@ async def upload_student_photos(
             file_size=file_size,
             mime_type=file.content_type,
             md5_hash=md5_hash,
-            metadata_json={"original_filename": file.filename}
+            metadata_json=meta
         )
         db.add(db_photo)
         uploaded_photos.append(db_photo)
@@ -714,3 +777,306 @@ async def get_student_enrollment_status(
         "enrolled_views": list(set(successful_views)),
         "quality_scores": quality_scores
     }
+
+@router.post("/{id}/enroll-from-video", response_model=SameVideoEnrollResponse, status_code=status.HTTP_201_CREATED)
+async def enroll_student_from_same_video(
+    id: uuid.UUID,
+    payload: SameVideoEnrollRequest,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Phase F24.0D: Enroll student directly from source CCTV video footage.
+    Extracts frame at native resolution without lossy recompression/enhancement,
+    records video identifier, timestamp, and frame index in metadata,
+    extracts 512-dim normalized ArcFace embedding, and executes controlled diagnostic.
+    """
+    # 1. Fetch student
+    student_res = await db.execute(select(Student).filter(Student.id == id))
+    student = student_res.scalars().first()
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with ID {id} not found."
+        )
+
+    # 2. Resolve video path
+    resolved_video_path = payload.video_path
+    video_identifier = str(payload.video_id) if payload.video_id else None
+
+    if payload.video_id:
+        v_res = await db.execute(select(Video).filter(Video.id == payload.video_id))
+        video_obj = v_res.scalars().first()
+        if video_obj and video_obj.file_path:
+            resolved_video_path = video_obj.file_path
+            video_identifier = str(video_obj.id)
+
+    if not resolved_video_path or not os.path.exists(resolved_video_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Valid video path could not be resolved or does not exist: {resolved_video_path}"
+        )
+
+    if not video_identifier:
+        video_identifier = os.path.basename(resolved_video_path)
+
+    # 3. Extract exact source frame preserving native resolution
+    view = payload.view.lower().strip() or "front"
+    student_view_dir = os.path.join("storage", "students", str(id), view)
+    os.makedirs(student_view_dir, exist_ok=True)
+    out_filename = f"{uuid.uuid4()}.png"
+    photo_path = os.path.join(student_view_dir, out_filename)
+
+    extract_res = extract_enrollment_image_from_video(
+        video_path=resolved_video_path,
+        frame_idx=payload.frame_idx,
+        timestamp_sec=payload.timestamp_seconds,
+        output_path=photo_path,
+        video_identifier=video_identifier
+    )
+    if not extract_res.get("success"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=extract_res.get("error", "Failed to extract frame from video")
+        )
+
+    # 4. Process extracted photo with ArcFace
+    engine = FaceEnrollmentEngine()
+    qdrant_store = QdrantVectorStore()
+
+    proc_res = engine.process_photo(photo_path)
+    if not proc_res.get("success"):
+        if os.path.exists(photo_path):
+            try:
+                os.remove(photo_path)
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Face extraction failed on video frame: {proc_res.get('error')}"
+        )
+
+    file_size = os.path.getsize(photo_path)
+    with open(photo_path, "rb") as f_in:
+        md5_hash = hashlib.md5(f_in.read()).hexdigest()
+
+    # 5. Persist StudentPhoto
+    meta = extract_res["metadata"]
+    db_photo = StudentPhoto(
+        student_id=id,
+        photo_path=photo_path,
+        view=view,
+        file_size=file_size,
+        mime_type="image/png",
+        md5_hash=md5_hash,
+        metadata_json=meta
+    )
+    db.add(db_photo)
+    await db.flush()
+
+    # 6. Persist StudentFaceEmbedding
+    embedding_id = uuid.uuid4()
+    yaw, pitch, roll = proc_res["pose"]
+    db_embedding = StudentFaceEmbedding(
+        id=embedding_id,
+        student_id=id,
+        photo_id=db_photo.id,
+        embedding=proc_res["embedding"],
+        model_version=engine.model_name,
+        quality_score=proc_res["quality_score"],
+        blur_score=proc_res["blur_score"],
+        pose_yaw=float(yaw),
+        pose_pitch=float(pitch),
+        pose_roll=float(roll),
+        face_bbox={
+            "x1": proc_res["bbox"][0],
+            "y1": proc_res["bbox"][1],
+            "x2": proc_res["bbox"][2],
+            "y2": proc_res["bbox"][3]
+        }
+    )
+    db.add(db_embedding)
+
+    # 7. Upsert to Qdrant
+    try:
+        qdrant_store.upsert_face_embedding(
+            embedding_id=embedding_id,
+            vector=proc_res["embedding"],
+            payload={
+                "student_id": id,
+                "photo_id": db_photo.id,
+                "view": view,
+                "quality": proc_res["quality_score"],
+                "department": student.department,
+                "year": student.year,
+                "source": "cctv_video",
+                "video_identifier": video_identifier
+            }
+        )
+    except Exception as qe:
+        logger.warning(f"Failed to index embedding into Qdrant: {qe}")
+
+    student.embedding_generated = True
+    db.add(student)
+    await db.commit()
+
+    # 8. Controlled diagnostic check against exact live source frame
+    diag_res = run_controlled_source_diagnostic(
+        enrollment_photo_path=photo_path,
+        video_path=resolved_video_path,
+        frame_idx=extract_res["frame_idx"],
+        enrollment_embedding=proc_res["embedding"],
+        face_engine=engine
+    )
+
+    return {
+        "success": True,
+        "photo_id": db_photo.id,
+        "student_id": id,
+        "video_identifier": video_identifier,
+        "frame_idx": extract_res["frame_idx"],
+        "timestamp_seconds": extract_res["timestamp_seconds"],
+        "resolution": extract_res["resolution"],
+        "quality_score": proc_res["quality_score"],
+        "blur_score": proc_res["blur_score"],
+        "photo_path": photo_path,
+        "diagnostic_passed": diag_res.get("diagnostic_passed", False),
+        "diagnostic_similarity": diag_res.get("similarity_score", 0.0),
+        "message": "Successfully enrolled student face from source CCTV video frame with quality preservation."
+    }
+
+@router.get("/{id}/photos/{photo_id}/diagnostic", response_model=ControlledDiagnosticResponse)
+async def get_photo_controlled_diagnostic(
+    id: uuid.UUID,
+    photo_id: uuid.UUID,
+    video_path: Optional[str] = None,
+    frame_idx: Optional[int] = None,
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Phase F24.0D Controlled Diagnostic:
+    Identifies original source frame associated with enrollment photo and compares
+    its ArcFace embedding against saved enrollment embedding.
+    """
+    photo_res = await db.execute(
+        select(StudentPhoto).filter(
+            StudentPhoto.id == photo_id,
+            StudentPhoto.student_id == id
+        )
+    )
+    photo = photo_res.scalars().first()
+    if not photo:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Photo not found for this student."
+        )
+
+    # Resolve source video and frame from photo metadata if available
+    meta = photo.metadata_json or {}
+    resolved_video_path = video_path or meta.get("video_path")
+    resolved_frame_idx = frame_idx if frame_idx is not None else meta.get("frame_idx")
+    resolved_timestamp = meta.get("timestamp_seconds") or meta.get("timestamp")
+
+    if not resolved_video_path and meta.get("video_id"):
+        try:
+            v_uuid = uuid.UUID(meta["video_id"])
+            v_res = await db.execute(select(Video).filter(Video.id == v_uuid))
+            v_obj = v_res.scalars().first()
+            if v_obj:
+                resolved_video_path = v_obj.file_path
+        except Exception:
+            pass
+
+    if not resolved_video_path or not os.path.exists(resolved_video_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot locate original source video associated with this enrollment photo."
+        )
+
+    # Fetch stored embedding
+    emb_res = await db.execute(
+        select(StudentFaceEmbedding).filter(StudentFaceEmbedding.photo_id == photo_id)
+    )
+    emb_obj = emb_res.scalars().first()
+    stored_embedding = emb_obj.embedding if emb_obj else None
+
+    diag = run_controlled_source_diagnostic(
+        enrollment_photo_path=photo.photo_path,
+        video_path=resolved_video_path,
+        frame_idx=resolved_frame_idx,
+        timestamp_sec=resolved_timestamp,
+        enrollment_embedding=stored_embedding
+    )
+
+    return diag
+
+@router.post("/same-video-match-verification", response_model=SameVideoMatchReport)
+async def verify_same_video_match_api(
+    video_path: str = Form(...),
+    student_id: Optional[uuid.UUID] = Form(None),
+    source_frame_idx: Optional[int] = Form(None),
+    eval_step: int = Form(15),
+    db: AsyncSession = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_user)
+) -> Any:
+    """
+    Phase F24.0D: Verify face match across uploaded CCTV video against enrolled student.
+    Reports detection, valid embedding, and acceptance separately, evaluates source frame
+    and other frames separately, and enforces 0.60/0.75 thresholds and 0.05 ambiguity margin.
+    """
+    if not os.path.exists(video_path):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Video file does not exist: {video_path}"
+        )
+
+    # Fetch enrolled student embedding and gallery
+    enr_emb = None
+    if student_id:
+        emb_res = await db.execute(
+            select(StudentFaceEmbedding).filter(StudentFaceEmbedding.student_id == student_id)
+        )
+        emb_list = emb_res.scalars().all()
+        if emb_list:
+            enr_emb = emb_list[0].embedding
+
+    # Build gallery snapshot from database
+    all_emb_res = await db.execute(
+        select(StudentFaceEmbedding.student_id, StudentFaceEmbedding.embedding)
+    )
+    g_sids = []
+    g_vecs = []
+    for sid, emb in all_emb_res.all():
+        if emb and len(emb) == 512:
+            arr = np.array(emb, dtype=np.float32)
+            n = np.linalg.norm(arr)
+            if n > 0:
+                g_vecs.append(arr / n)
+                g_sids.append(sid)
+
+    gallery = {
+        "matrix": np.vstack(g_vecs) if g_vecs else None,
+        "sids": g_sids
+    }
+
+    if enr_emb is None:
+        if g_vecs:
+            enr_emb = g_vecs[0].tolist()
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No enrolled face embeddings found in gallery."
+            )
+
+    report = verify_same_video_face_match(
+        video_path=video_path,
+        enrollment_embedding=enr_emb,
+        gallery=gallery,
+        source_frame_idx=source_frame_idx,
+        enrolled_student_id=student_id,
+        eval_frame_step=eval_step
+    )
+
+    return report
+

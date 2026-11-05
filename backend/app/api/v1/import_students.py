@@ -302,9 +302,14 @@ async def trigger_bulk_face_enrollment(
     )
     db.add(job)
     await db.commit()
-    await db.refresh(job)
-
-    bulk_enroll_faces_task.delay(str(job.id))
+    try:
+        bulk_enroll_faces_task.delay(str(job.id))
+    except Exception as e:
+        logger.error(f"Failed to dispatch bulk enroll task to Celery: {str(e)}")
+        job.status = "failed"
+        job.report = {"summary": "Queue Failure", "error": f"Could not enqueue task: {str(e)}"}
+        await db.commit()
+        await db.refresh(job)
     
     return job
 

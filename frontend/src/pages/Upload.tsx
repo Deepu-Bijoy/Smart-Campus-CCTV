@@ -3,12 +3,18 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import { Upload, Film, Loader2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useUploadConfig, formatBytes } from '../config/upload';
 
 export const UploadFeed: React.FC = () => {
+  const { data: uploadConfig } = useUploadConfig();
+  const maxUploadSizeBytes = uploadConfig?.max_upload_size_bytes || 5368709120;
+  const uploadLimitFormatted = uploadConfig?.max_upload_size_formatted || formatBytes(maxUploadSizeBytes);
+
   const queryClient = useQueryClient();
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState('');
   const [cameraId, setCameraId] = useState('');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const navigate = useNavigate();
 
   const { data: cameras } = useQuery({
@@ -22,6 +28,9 @@ export const UploadFeed: React.FC = () => {
   const mutation = useMutation({
     mutationFn: async () => {
       if (!file) return;
+      if (file.size > maxUploadSizeBytes) {
+        throw { response: { status: 413, data: { detail: `Video upload size exceeds the ${uploadLimitFormatted} limit (${maxUploadSizeBytes.toLocaleString()} bytes).` } } };
+      }
       const formData = new FormData();
       formData.append('file', file);
       if (title) {
@@ -30,31 +39,85 @@ export const UploadFeed: React.FC = () => {
       if (cameraId) {
         formData.append('camera_id', cameraId);
       }
-      const response = await api.post('/videos/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-      });
-      return response.data;
+
+      try {
+        const response = await api.post('/videos/upload', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+          timeout: 0,
+        });
+        return response.data;
+      } catch (err: any) {
+        // If the upload request reports an error but the video was already created on the backend,
+        // verify with the server before declaring failure to avoid duplicate retries.
+        if (!err.response || err.response.status >= 500) {
+          try {
+            const listRes = await api.get('/videos');
+            const videos = Array.isArray(listRes.data) ? listRes.data : (listRes.data?.items || []);
+            const recentMatching = videos.find((v: any) =>
+              (v.original_filename === file.name || v.title === (title || file.name.replace(/\.[^/.]+$/, ''))) &&
+              (Date.now() - new Date(v.created_at).getTime() < 120000)
+            );
+            if (recentMatching) {
+              return recentMatching;
+            }
+          } catch {
+            // Verification request failed, proceed to handle original error
+          }
+        }
+        throw err;
+      }
     },
     onSuccess: async () => {
+      setErrorMessage(null);
+      mutation.reset();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['videos-list'] }),
         queryClient.invalidateQueries({ queryKey: ['recent-videos'] }),
         queryClient.invalidateQueries({ queryKey: ['dashboard-metrics'] }),
       ]);
       navigate('/videos');
+    },
+    onError: (err: any) => {
+      const status = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      if (typeof detail === 'string' && detail.trim()) {
+        setErrorMessage(`Upload failed: ${detail}`);
+      } else if (status === 413) {
+        setErrorMessage(`Upload failed: Video upload size exceeds the ${uploadLimitFormatted} limit (${maxUploadSizeBytes.toLocaleString()} bytes).`);
+      } else if (status === 400) {
+        setErrorMessage('Upload failed: Unsupported video format. Allowed formats: MP4, AVI, MKV, MOV.');
+      } else if (status === 500) {
+        setErrorMessage('Upload failed: Server error encountered during upload.');
+      } else if (err?.message) {
+        setErrorMessage(`Upload failed: ${err.message}`);
+      } else {
+        setErrorMessage('Upload failed: Could not complete video upload.');
+      }
     }
   });
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setFile(e.target.files[0]);
+      const selected = e.target.files[0];
+      if (selected.size > maxUploadSizeBytes) {
+        setFile(null);
+        setErrorMessage(`Upload failed: Video upload size exceeds the ${uploadLimitFormatted} limit (${maxUploadSizeBytes.toLocaleString()} bytes).`);
+        mutation.reset();
+        return;
+      }
+      setFile(selected);
+      setErrorMessage(null);
+      mutation.reset();
     }
   };
 
   const handleUpload = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!file || mutation.isPending) return;
+    setErrorMessage(null);
+    mutation.reset();
     mutation.mutate();
   };
 
@@ -66,9 +129,9 @@ export const UploadFeed: React.FC = () => {
       </div>
 
       <form onSubmit={handleUpload} className="bg-white border border-slate-200 rounded-2xl p-8 shadow-sm space-y-6">
-        {mutation.error && (
+        {errorMessage && (
           <div className="bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg p-3 text-center">
-            Upload failed: {(mutation.error as any).response?.data?.detail || "Make sure file is a valid video format."}
+            {errorMessage}
           </div>
         )}
 
@@ -78,7 +141,13 @@ export const UploadFeed: React.FC = () => {
             type="text"
             placeholder="e.g. Science Block West Gate"
             value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              if (errorMessage) {
+                setErrorMessage(null);
+                mutation.reset();
+              }
+            }}
             className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-900 placeholder-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition text-sm"
           />
         </div>
@@ -87,7 +156,13 @@ export const UploadFeed: React.FC = () => {
           <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider">Associate Camera Source</label>
           <select
             value={cameraId}
-            onChange={(e) => setCameraId(e.target.value)}
+            onChange={(e) => {
+              setCameraId(e.target.value);
+              if (errorMessage) {
+                setErrorMessage(null);
+                mutation.reset();
+              }
+            }}
             className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition text-sm"
           >
             <option value="">Select Camera...</option>
@@ -122,7 +197,7 @@ export const UploadFeed: React.FC = () => {
                   <Upload className="h-8 w-8 text-slate-500" />
                 </div>
                 <p className="font-semibold text-slate-700 text-sm">Click or drag video file here</p>
-                <p className="text-xs text-slate-400">MP4, AVI, or MKV formats</p>
+                <p className="text-xs text-slate-400">MP4, AVI, MKV, or MOV formats (Up to {uploadLimitFormatted})</p>
               </div>
             )}
           </div>

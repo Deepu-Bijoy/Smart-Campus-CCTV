@@ -56,6 +56,44 @@ class ViolenceSegment(BaseModel):
     students: List[InvolvedStudentCard] = []
     tracks: List[SegmentTrackInfo] = []
 
+class StudentVerificationResult(BaseModel):
+    student_name: str
+    student_id: Optional[str] = None
+    enrollment_status: str  # "RESOLVED_VALID_EMBEDDING", "ENROLLMENT_MISSING_EMBEDDINGS", "STUDENT_NOT_FOUND", "AMBIGUOUS_RECORDS"
+    enrollment_error: Optional[str] = None
+    face_detected: bool = False
+    valid_embedding_generated: bool = False
+    observed_in_violence_interval: bool = False
+    direct_fight_evidence: bool = False
+    identity_status: str  # "CONFIRMED", "UNRESOLVED", "NOT_OBSERVED", "SUB_THRESHOLD", "AMBIGUOUS", "FACE_NOT_USABLE"
+    participation_status: str  # "CONFIRMED_PARTICIPANT", "IDENTIFIED_NEAR_INCIDENT", "POSSIBLE_PARTICIPANT_UNVERIFIED", "NOT_OBSERVED_IN_INCIDENT", "NO_VIOLENCE_DETECTED", "IDENTITY_UNRESOLVED"
+    similarity_score: Optional[float] = None
+    confidence: Optional[str] = None  # "high", "medium", "none"
+    runner_up_identity: Optional[str] = None
+    runner_up_similarity: Optional[float] = None
+    margin: Optional[float] = None
+    best_evidence_timestamp: Optional[float] = None
+    best_evidence_frame: Optional[int] = None
+    best_track_id: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    source_frame_diagnostic: Optional[Dict[str, Any]] = None
+    explanation: str
+
+class TargetedParticipantVerification(BaseModel):
+    video_id: Optional[str] = None
+    video_filename: Optional[str] = None
+    violence_detected: bool = False
+    violence_intervals: List[Dict[str, Any]] = []
+    overall_violence_confidence: float = 0.0
+    ash: StudentVerificationResult
+    jose_john: StudentVerificationResult
+    track_ids: List[str] = []
+    face_failures: List[Dict[str, Any]] = []
+    candidate_evaluations: List[Dict[str, Any]] = []
+    video_pass_metrics: Optional[Dict[str, Any]] = None
+    diagnostic_details: Optional[Dict[str, Any]] = None
+    verified_at: Optional[datetime] = None
+
 class ViolenceAnalysisResponse(BaseModel):
     video_id: uuid.UUID
     video_title: str
@@ -72,6 +110,7 @@ class ViolenceAnalysisResponse(BaseModel):
     identified_students: List[InvolvedStudentCard] = []
     incident_id: Optional[uuid.UUID] = None
     analyzed_at: datetime
+    targeted_verification: Optional[TargetedParticipantVerification] = None
 
 class ViolenceReportRequest(BaseModel):
     incident_id: Optional[uuid.UUID] = None

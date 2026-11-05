@@ -65,7 +65,7 @@ async def upload_video(
     
     try:
         total_size = 0
-        max_size = settings.MAX_UPLOAD_SIZE_BYTES  # 500 MiB (524,288,000 bytes)
+        max_size = settings.MAX_UPLOAD_SIZE_BYTES
         with open(saved_path, "wb") as buffer:
             while chunk := await file.read(1024 * 1024):
                 total_size += len(chunk)
@@ -75,7 +75,7 @@ async def upload_video(
                         os.remove(saved_path)
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Video upload size exceeds 500 MiB limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
+                        detail=f"Video upload size exceeds {settings.max_upload_size_formatted} limit ({settings.MAX_UPLOAD_SIZE_BYTES:,} bytes)."
                     )
                 buffer.write(chunk)
     except HTTPException:
@@ -192,6 +192,16 @@ async def upload_video(
             from app.tasks.video_tasks import register_video_task
             register_video_task(str(video.id), task_res.id)
         logger.info(f"Task successfully dispatched to Celery for Video: {video.id}")
+
+        # Check worker availability so queued jobs cannot silently stall without operator awareness
+        from app.tasks.cel_app import get_celery_worker_status
+        w_status = get_celery_worker_status(timeout=0.3)
+        if not w_status.get("online"):
+            logger.warning(f"Video {video.id} queued in Redis, but no Celery worker is consuming gpu_queue.")
+            video.current_stage = "Queued (Worker Offline)"
+            video.error_message = "Job queued to Redis gpu_queue, but no active Celery worker was detected on the host."
+            await db.commit()
+            await db.refresh(video)
     except Exception as e:
         logger.error(f"Failed to dispatch Celery task: {str(e)}")
         video.status = "failed"
@@ -281,6 +291,18 @@ async def list_videos(
         )
     return response_items
 
+@router.get("/config")
+@router.get("/upload-config")
+async def get_video_upload_config() -> Any:
+    """
+    Returns the configured video upload limit and allowed video formats.
+    """
+    return {
+        "max_upload_size_bytes": settings.MAX_UPLOAD_SIZE_BYTES,
+        "max_upload_size_formatted": settings.max_upload_size_formatted,
+        "allowed_formats": ["MP4", "AVI", "MKV", "MOV"]
+    }
+
 @router.get("/{video_id}", response_model=VideoResponse)
 async def get_video(
     video_id: uuid.UUID,
@@ -354,11 +376,28 @@ async def get_video_status(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Video not found"
         )
+    stage = video.current_stage
+    err_msg = video.error_message
+    w_desc = None
+
+    if video.status == "queued":
+        from app.tasks.cel_app import get_celery_worker_status
+        w_status = get_celery_worker_status(timeout=0.3)
+        if not w_status.get("online"):
+            w_desc = "Offline"
+            stage = "Queued (Worker Offline - No Celery Worker on gpu_queue)"
+            if not err_msg:
+                err_msg = "No active Celery worker consuming gpu_queue. Start worker to process: celery -A app.tasks.cel_app.celery_app worker -Q gpu_queue,cpu_queue -P solo -l info"
+        else:
+            w_desc = "Online"
+
     return {
         "video_id": video.id,
         "status": video.status,
-        "stage": video.current_stage,
-        "progress": video.progress_percentage
+        "stage": stage,
+        "progress": video.progress_percentage,
+        "error_message": err_msg,
+        "worker_status": w_desc
     }
 
 @router.delete("/{video_id}", status_code=status.HTTP_204_NO_CONTENT)

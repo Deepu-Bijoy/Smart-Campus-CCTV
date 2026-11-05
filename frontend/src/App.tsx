@@ -17,7 +17,6 @@ import { Students } from './pages/Students';
 import { StudentDetails } from './pages/StudentDetails';
 import { Search } from './pages/Search';
 import { TimelinePage } from './pages/TimelinePage';
-import { Settings } from './pages/Settings';
 import { CreateUser } from './pages/UserManagement/CreateUser';
 import { Sidebar } from './components/Sidebar';
 import { Navbar } from './components/Navbar';
@@ -26,7 +25,11 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       refetchOnWindowFocus: false,
-      retry: 1,
+      retry: (failureCount, error: any) => {
+        const status = error?.response?.status || error?.status;
+        if (status >= 400 && status < 500) return false;
+        return failureCount < 1;
+      },
       staleTime: 30000,
       gcTime: 5 * 60 * 1000,
     },
@@ -86,7 +89,6 @@ const Layout: React.FC = () => {
             <Route path="/students/:id" element={<StudentDetails />} />
             <Route path="/search" element={<Search />} />
             <Route path="/timeline/:id" element={<TimelinePage />} />
-            <Route path="/settings" element={<Settings />} />
             <Route
               path="/users/create"
               element={

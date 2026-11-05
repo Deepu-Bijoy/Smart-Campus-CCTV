@@ -330,7 +330,7 @@ class X3DViolenceDetector:
             if not ret or frame is None:
                 break
 
-            buffer[curr_frame_idx] = frame
+            buffer[curr_frame_idx] = cv2.resize(frame, (w, h), interpolation=cv2.INTER_LINEAR)
 
             # If total_frames was unknown at start, plan window dynamically
             if total_planned_windows == 0:
@@ -344,7 +344,7 @@ class X3DViolenceDetector:
                 if curr_frame_idx + 1 >= e_idx:
                     t_pre_start = time.time()
                     indices = np.linspace(s_idx, e_idx - 1, num=self.num_frames).astype(int)
-                    sampled = [cv2.resize(buffer[i], (w, h), interpolation=cv2.INTER_LINEAR) for i in indices]
+                    sampled = [buffer[i] for i in indices]
                     arr = np.stack(sampled, axis=0)
                     arr = arr[..., ::-1].copy()
 
@@ -379,7 +379,7 @@ class X3DViolenceDetector:
             if s_cand + self.num_frames <= curr_frame_idx:
                 e_cand = curr_frame_idx
                 indices = np.linspace(s_cand, e_cand - 1, num=self.num_frames).astype(int)
-                sampled = [cv2.resize(buffer[i], (w, h), interpolation=cv2.INTER_LINEAR) for i in indices]
+                sampled = [buffer[i] for i in indices]
                 arr = np.stack(sampled, axis=0)[..., ::-1].copy()
                 t_clip = torch.from_numpy(arr).to(self.device).float() / 255.0
                 t_clip = t_clip.permute(3, 0, 1, 2).contiguous().unsqueeze(0)

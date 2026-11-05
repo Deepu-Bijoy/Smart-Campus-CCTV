@@ -212,12 +212,12 @@ class TestPhaseF23UploadSuite(unittest.TestCase):
         data_vio = res_vio.json()
         self.assertEqual(data_vio["file_size"], target_size)
 
-    def test_3_valid_file_exactly_at_limit(self):
-        """Upload of a video exactly at 524,288,000 bytes succeeds with HTTP 201."""
-        exact_size = settings.MAX_UPLOAD_SIZE_BYTES  # 524,288,000 bytes
-        exact_path = create_minimal_valid_mp4(target_size_bytes=exact_size)
+    def test_3_valid_file_at_500mib_succeeds(self):
+        """Upload of a video at 524,288,000 bytes (old 500 MiB limit) succeeds with HTTP 201 under new 5 GiB limit."""
+        target_size = 524_288_000  # 500 MiB (524,288,000 bytes)
+        exact_path = create_minimal_valid_mp4(target_size_bytes=target_size)
         self.temp_files.append(exact_path)
-        self.assertEqual(os.path.getsize(exact_path), exact_size)
+        self.assertEqual(os.path.getsize(exact_path), target_size)
 
         with open(exact_path, "rb") as f:
             res_v = self.client.post(
@@ -226,7 +226,7 @@ class TestPhaseF23UploadSuite(unittest.TestCase):
                 headers=self.headers
             )
         self.assertEqual(res_v.status_code, 201, f"Expected 201, got {res_v.status_code}: {res_v.text}")
-        self.assertEqual(res_v.json()["file_size"], exact_size)
+        self.assertEqual(res_v.json()["file_size"], target_size)
 
         with open(exact_path, "rb") as f:
             res_vio = self.client.post(
@@ -235,33 +235,36 @@ class TestPhaseF23UploadSuite(unittest.TestCase):
                 headers=self.headers
             )
         self.assertEqual(res_vio.status_code, 201, f"Expected 201, got {res_vio.status_code}: {res_vio.text}")
-        self.assertEqual(res_vio.json()["file_size"], exact_size)
+        self.assertEqual(res_vio.json()["file_size"], target_size)
 
     def test_4_file_exceeding_limit(self):
-        """Upload exceeding 524,288,000 bytes is rejected with HTTP 413 and clear error."""
-        oversized_size = settings.MAX_UPLOAD_SIZE_BYTES + 1024
-        stream_v = ChunkedOversizedStream(oversized_size)
+        """Upload exceeding configured MAX_UPLOAD_SIZE_BYTES is rejected with HTTP 413 and clear error."""
+        import unittest.mock as mock
+        simulated_limit = 50 * 1024 * 1024  # 50 MiB for fast, simulated testing
+        with mock.patch.object(settings, "MAX_UPLOAD_SIZE_BYTES", simulated_limit):
+            oversized_size = simulated_limit + 1024
+            stream_v = ChunkedOversizedStream(oversized_size)
 
-        res_v = self.client.post(
-            "/api/v1/videos/upload",
-            files={"file": ("too_large_general.mp4", stream_v, "video/mp4")},
-            headers=self.headers
-        )
-        self.assertEqual(res_v.status_code, 413, f"Expected 413, got {res_v.status_code}")
-        detail_v = res_v.json().get("detail", "").lower()
-        self.assertIn("500 mib", detail_v)
-        self.assertIn("524,288,000", detail_v)
+            res_v = self.client.post(
+                "/api/v1/videos/upload",
+                files={"file": ("too_large_general.mp4", stream_v, "video/mp4")},
+                headers=self.headers
+            )
+            self.assertEqual(res_v.status_code, 413, f"Expected 413, got {res_v.status_code}")
+            detail_v = res_v.json().get("detail", "").lower()
+            self.assertIn("exceeds", detail_v)
+            self.assertIn(f"{simulated_limit:,}", detail_v)
 
-        stream_vio = ChunkedOversizedStream(oversized_size)
-        res_vio = self.client.post(
-            "/api/v1/violence/upload",
-            files={"file": ("too_large_violence.mp4", stream_vio, "video/mp4")},
-            headers=self.headers
-        )
-        self.assertEqual(res_vio.status_code, 413, f"Expected 413, got {res_vio.status_code}")
-        detail_vio = res_vio.json().get("detail", "").lower()
-        self.assertIn("500 mib", detail_vio)
-        self.assertIn("524,288,000", detail_vio)
+            stream_vio = ChunkedOversizedStream(oversized_size)
+            res_vio = self.client.post(
+                "/api/v1/violence/upload",
+                files={"file": ("too_large_violence.mp4", stream_vio, "video/mp4")},
+                headers=self.headers
+            )
+            self.assertEqual(res_vio.status_code, 413, f"Expected 413, got {res_vio.status_code}")
+            detail_vio = res_vio.json().get("detail", "").lower()
+            self.assertIn("exceeds", detail_vio)
+            self.assertIn(f"{simulated_limit:,}", detail_vio)
 
     def test_5_invalid_extensions(self):
         """Uploading non-video extensions (.exe, .txt) returns HTTP 400."""
@@ -328,14 +331,17 @@ class TestPhaseF23UploadSuite(unittest.TestCase):
         initial_count = asyncio.run(_count_videos())
         storage_files_before = set(os.listdir(settings.STORAGE_DIR)) if os.path.exists(settings.STORAGE_DIR) else set()
 
-        # Attempt oversized upload
-        stream = ChunkedOversizedStream(settings.MAX_UPLOAD_SIZE_BYTES + 2048)
-        res = self.client.post(
-            "/api/v1/videos/upload",
-            files={"file": ("cleanup_test.mp4", stream, "video/mp4")},
-            headers=self.headers
-        )
-        self.assertEqual(res.status_code, 413)
+        # Attempt oversized upload with fast simulated stream
+        import unittest.mock as mock
+        simulated_limit = 20 * 1024 * 1024
+        with mock.patch.object(settings, "MAX_UPLOAD_SIZE_BYTES", simulated_limit):
+            stream = ChunkedOversizedStream(simulated_limit + 2048)
+            res = self.client.post(
+                "/api/v1/videos/upload",
+                files={"file": ("cleanup_test.mp4", stream, "video/mp4")},
+                headers=self.headers
+            )
+            self.assertEqual(res.status_code, 413)
 
         # Attempt corrupt upload
         res_corrupt = self.client.post(

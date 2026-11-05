@@ -4,7 +4,16 @@ import logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import atexit
-from celery import shared_task, Task
+try:
+    from celery import shared_task, Task
+except ImportError:
+    def shared_task(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    class Task:
+        pass
+
 from sqlalchemy.future import select
 
 from app.db.session import SessionLocal

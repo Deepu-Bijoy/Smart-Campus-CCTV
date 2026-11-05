@@ -1,0 +1,50 @@
+[
+  {
+    "dataset": "Dataset A (Real CCTV Sample)",
+    "video_path": "c:\\Users\\Asus\\OneDrive\\Desktop\\AI-Powered Smart CCTV Investigation System\\backend\\storage\\test_debug_media\\x3d_fight_event.mp4",
+    "duration": 4.0,
+    "fps": 20.0,
+    "resolution": "640x480",
+    "total_frames": 80,
+    "t_x3d": 1.6190428733825684,
+    "t_yolo": 2.089920997619629,
+    "t_track": 1.1484289169311523,
+    "t_face": 2.284883975982666,
+    "t_evidence": 1.2016985416412354,
+    "t_db": 0.12672853469848633,
+    "t_total": 8.470902681350708,
+    "speed_factor": 0.4722046929905455,
+    "peak_vram_mb": 226.2177734375,
+    "host_ram_mb": 2342.23828125,
+    "providers": {
+      "x3d": "cuda",
+      "yolo": "cuda",
+      "face": "CPUExecutionProvider"
+    },
+    "segments": 0
+  },
+  {
+    "dataset": "Dataset B (Synthetic Short Video)",
+    "video_path": "c:\\Users\\Asus\\OneDrive\\Desktop\\AI-Powered Smart CCTV Investigation System\\backend\\storage\\test_debug_media\\valid_cctv_01.mp4",
+    "duration": 4.0,
+    "fps": 10.0,
+    "resolution": "320x240",
+    "total_frames": 40,
+    "t_x3d": 0.09452295303344727,
+    "t_yolo": 0.2365708351135254,
+    "t_track": 0.670255184173584,
+    "t_face": 0.5343868732452393,
+    "t_evidence": 0.6971173286437988,
+    "t_db": 0.0007612705230712891,
+    "t_total": 2.2337963581085205,
+    "speed_factor": 1.7906735255791277,
+    "peak_vram_mb": 240.412109375,
+    "host_ram_mb": 2326.82421875,
+    "providers": {
+      "x3d": "cuda",
+      "yolo": "cuda",
+      "face": "CPUExecutionProvider"
+    },
+    "segments": 0
+  }
+]

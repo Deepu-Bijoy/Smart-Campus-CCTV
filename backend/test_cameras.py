@@ -29,10 +29,12 @@ mock_user = User(
     email="operator@smartcampus.com",
     hashed_password="hashedpassword123",
     full_name="Lead Security Operator",
+    role="admin",
     is_active=True
 )
 
 app.dependency_overrides[deps.get_current_user] = lambda: mock_user
+app.dependency_overrides[deps.require_admin] = lambda: mock_user
 
 client = TestClient(app)
 
@@ -163,6 +165,31 @@ def test_camera_crud_endpoints():
     }
     response = client.post(f"/api/v1/cameras/{camera_id}/zones", json=zone_payload)
     assert response.status_code == status.HTTP_201_CREATED
+
+    print("Checking DELETE /cameras/{id}/zones/{zone_id} (wrong camera ID validation)...")
+    wrong_cam_id = uuid.uuid4()
+    response = client.delete(f"/api/v1/cameras/{wrong_cam_id}/zones/{zone_id}")
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    assert response.json()["detail"] == "Zone does not belong to this camera."
+
+    print("Checking DELETE /cameras/{id}/zones/{zone_id} (success)...")
+    response = client.delete(f"/api/v1/cameras/{camera_id}/zones/{zone_id}")
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["message"] == "Zone successfully deleted."
+
+    print("Checking DELETE /cameras/{id}/zones/{zone_id} (nonexistent zone 404)...")
+    async def mock_execute_not_found(stmt):
+        stmt_str = str(stmt).lower()
+        if "virtualzone" in stmt_str or "virtual_zone" in stmt_str:
+            return MockSQLResult([])
+        elif "camera" in stmt_str:
+            return MockSQLResult([mock_camera])
+        return MockSQLResult([])
+    mock_db.execute = mock_execute_not_found
+    response = client.delete(f"/api/v1/cameras/{camera_id}/zones/{uuid.uuid4()}")
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+    assert response.json()["detail"] == "Zone not found."
+    mock_db.execute = mock_execute
 
     print("Checking DELETE /cameras/{id}...")
     response = client.delete(f"/api/v1/cameras/{camera_id}")

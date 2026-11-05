@@ -69,5 +69,7 @@ class VideoStatusResponse(BaseModel):
     status: str
     stage: Optional[str] = None
     progress: int
+    error_message: Optional[str] = None
+    worker_status: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)

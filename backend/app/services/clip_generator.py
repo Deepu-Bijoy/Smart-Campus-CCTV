@@ -2,6 +2,7 @@ import os
 import logging
 import subprocess
 import cv2
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,13 @@ def is_ffmpeg_available() -> bool:
         _ffmpeg_available_cache = False
     return _ffmpeg_available_cache
 
-def generate_subclip(video_path: str, timestamp: float, duration: float, output_path: str) -> bool:
+def generate_subclip(
+    video_path: str,
+    timestamp: float,
+    duration: float,
+    output_path: str,
+    video_duration: Optional[float] = None
+) -> bool:
     """
     Generates a browser-compatible H.264 sub-clip centered at the target timestamp.
     Prioritizes FFmpeg with libx264 and aac encoding, falling back to OpenCV VideoWriter if unavailable.
@@ -42,17 +49,20 @@ def generate_subclip(video_path: str, timestamp: float, duration: float, output_
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     
     # Calculate start and duration
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        logger.error(f"Failed to open source video at: {video_path}")
-        return False
+    if video_duration is not None and video_duration > 0:
+        video_len = float(video_duration)
+    else:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"Failed to open source video at: {video_path}")
+            return False
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 25.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    video_len = total_frames / fps if total_frames > 0 else 0.0
-    cap.release()
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0:
+            fps = 25.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        video_len = total_frames / fps if total_frames > 0 else 0.0
+        cap.release()
 
     if video_len > 0:
         # Event near beginning: start at 0.0
@@ -82,6 +92,7 @@ def generate_subclip(video_path: str, timestamp: float, duration: float, output_
                 "-t", f"{actual_duration:.3f}",
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
+                "-threads", "4",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
                 "-movflags", "+faststart",

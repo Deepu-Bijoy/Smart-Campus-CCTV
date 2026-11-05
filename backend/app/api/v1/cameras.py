@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, or_, cast, String
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -164,7 +164,12 @@ async def create_camera_zone(
     """
     Add a polygon or line virtual monitoring zone to a camera.
     """
-    stmt = select(Camera).filter(Camera.id == id)
+    stmt = select(Camera).filter(
+        or_(
+            cast(Camera.id, String) == str(id),
+            cast(Camera.id, String) == id.hex
+        )
+    )
     result = await db.execute(stmt)
     camera = result.scalars().first()
     if not camera:
@@ -175,7 +180,7 @@ async def create_camera_zone(
 
     db_obj = VirtualZone(
         id=uuid.uuid4(),
-        camera_id=id,
+        camera_id=camera.id,
         name=zone_in.name,
         zone_type=zone_in.zone_type,
         geometry_type=zone_in.geometry_type,
@@ -197,15 +202,40 @@ async def delete_camera_zone(
     """
     Delete a virtual zone.
     """
-    stmt = select(VirtualZone).filter(VirtualZone.camera_id == id, VirtualZone.id == zone_id)
-    result = await db.execute(stmt)
-    zone = result.scalars().first()
-    if not zone:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Zone not found on this camera."
+    try:
+        zone_canon = str(zone_id)
+        zone_hex = zone_id.hex
+        stmt = select(VirtualZone).filter(
+            or_(
+                cast(VirtualZone.id, String) == zone_canon,
+                cast(VirtualZone.id, String) == zone_hex
+            )
         )
+        result = await db.execute(stmt)
+        zone = result.scalars().first()
+        if not zone:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Zone not found."
+            )
 
-    await db.delete(zone)
-    await db.commit()
-    return {"message": "Zone successfully deleted."}
+        zone_cam_clean = str(zone.camera_id).replace("-", "").lower()
+        target_cam_clean = id.hex.lower()
+        if zone_cam_clean != target_cam_clean:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Zone does not belong to this camera."
+            )
+
+        await db.delete(zone)
+        await db.commit()
+        return {"message": "Zone successfully deleted."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error deleting virtual zone {zone_id} on camera {id}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete virtual zone due to internal database error."
+        )

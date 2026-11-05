@@ -45,6 +45,66 @@ class FrameProcessor:
                 raise
             logger.warning(f"Error in FrameProcessor progress callback for {self.video_id}: {e}")
 
+    def _flush_crops_chunk(
+        self,
+        chunk: List[Dict[str, Any]],
+        clips_list: List[Dict[str, Any]],
+        reids_list: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Processes a bounded batch of crops in streaming fashion:
+        extracts CLIP embeddings and OSNet Re-ID embeddings, then immediately releases image memory.
+        """
+        if not chunk:
+            return
+
+        imgs = []
+        valid_chunk = []
+        for item in chunk:
+            img = item.pop("crop_img", None)
+            if img is None and os.path.exists(item["crop_path"]):
+                img = cv2.imread(item["crop_path"])
+            if img is not None:
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                imgs.append(img_rgb)
+                valid_chunk.append((item, img))
+
+        if imgs:
+            try:
+                clip_embeddings = self.clip_embedder.get_image_embeddings(imgs)
+                for (item, _), emb in zip(valid_chunk, clip_embeddings):
+                    clips_list.append({
+                        "track_temp_id": item["track_temp_id"],
+                        "embedding": emb,
+                        "timestamp_seconds": item["timestamp_seconds"],
+                        "crop_path": item["crop_path"],
+                        "object_class": item["object_class"],
+                        "confidence": item["confidence"],
+                        "bounding_box": item["bounding_box"],
+                        "camera_id": item["camera_id"]
+                    })
+            except Exception as e:
+                logger.error(f"Error extracting batch CLIP embeddings: {e}")
+
+        # OSNet Re-ID embeddings for people
+        person_items = [(item, img) for item, img in valid_chunk if item["object_class"] == "person"]
+        if person_items:
+            person_imgs = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for _, img in person_items]
+            try:
+                reid_embeddings = self.reid_extractor.extract_batch(person_imgs)
+                for (item, _), emb in zip(person_items, reid_embeddings):
+                    reids_list.append({
+                        "track_temp_id": item["track_temp_id"],
+                        "embedding": emb,
+                        "timestamp_seconds": item["timestamp_seconds"],
+                        "crop_path": item["crop_path"],
+                        "camera_id": item["camera_id"],
+                        "confidence": item["confidence"],
+                        "bounding_box": item["bounding_box"]
+                    })
+            except Exception as e:
+                logger.error(f"Error extracting batch OSNet Re-ID embeddings: {e}")
+
     def process(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], int]:
         """
         Processes video frames, detects objects, runs tracking, and extracts Re-ID & CLIP embeddings.
@@ -60,6 +120,7 @@ class FrameProcessor:
         reids_list = []
         clips_list = []
         track_last_crop_frame = {}
+        track_crop_counts = {}
         
         logger.info(f"Frame extraction, tracking, and embeddings started for video {self.video_id} (Camera: {self.camera_id}).")
         self._notify_progress("Frame Extraction & Detection", 15)
@@ -121,10 +182,12 @@ class FrameProcessor:
                     
                     detections_list.append(detection_data)
                     
-                    # Task 2: Validation threshold >= 0.3 and track representative crop sampling (every 3 frames)
+                    # Task 2: Validation threshold >= 0.3 and track representative crop sampling
                     if conf >= 0.3:
                         last_frame = track_last_crop_frame.get(track_id, -10)
-                        if frame_num - last_frame >= 3 or last_frame < 0:
+                        crop_count = track_crop_counts.get(track_id, 0)
+                        sample_step = 3 if crop_count < 15 else (10 if crop_count < 30 else 30)
+                        if frame_num - last_frame >= sample_step or last_frame < 0:
                             x1, y1, x2, y2 = xyxy
                             x1_abs = max(0, int(round(x1)))
                             y1_abs = max(0, int(round(y1)))
@@ -149,75 +212,30 @@ class FrameProcessor:
                                             "track_temp_id": track_id,
                                             "timestamp_seconds": timestamp,
                                             "crop_path": crop_path,
+                                            "crop_img": crop,
                                             "object_class": object_class,
                                             "confidence": conf,
                                             "bounding_box": [float(x1), float(y1), float(x2), float(y2)],
                                             "camera_id": self.camera_id
                                         })
                                         track_last_crop_frame[track_id] = frame_num
+                                        track_crop_counts[track_id] = crop_count + 1
+                                        
+                                        # Bounded streaming flush: process embeddings in small chunks of 32
+                                        if len(crops_queue) >= 32:
+                                            self._flush_crops_chunk(crops_queue, clips_list, reids_list)
+                                            crops_queue.clear()
                                     except Exception as e:
                                         logger.error(f"Failed to write crop image: {str(e)}")
             
             if processed_count % 50 == 0:
-                logger.info(f"Processed {processed_count} frames. Queued crops for embeddings: {len(crops_queue)}")
+                logger.info(f"Processed {processed_count} frames. Cumulative embeddings generated: {len(clips_list)}")
 
+        # Flush any remaining crops in the queue
         if crops_queue:
-            self._notify_progress("Embeddings (CLIP)", 65)
-            logger.info(f"Extracting CLIP embeddings in batches of 64 for {len(crops_queue)} crops.")
-            batch_size = 64
-            for i in range(0, len(crops_queue), batch_size):
-                chunk = crops_queue[i : i + batch_size]
-                imgs = []
-                valid_chunk = []
-                for item in chunk:
-                    img = cv2.imread(item["crop_path"])
-                    if img is not None:
-                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        imgs.append(img_rgb)
-                        valid_chunk.append(item)
-                
-                if imgs:
-                    clip_embeddings = self.clip_embedder.get_image_embeddings(imgs)
-                    for item, emb in zip(valid_chunk, clip_embeddings):
-                        clips_list.append({
-                            "track_temp_id": item["track_temp_id"],
-                            "embedding": emb,
-                            "timestamp_seconds": item["timestamp_seconds"],
-                            "crop_path": item["crop_path"],
-                            "object_class": item["object_class"],
-                            "confidence": item["confidence"],
-                            "bounding_box": item["bounding_box"],
-                            "camera_id": item["camera_id"]
-                        })
-
-        person_crops = [item for item in crops_queue if item["object_class"] == "person"]
-        if person_crops:
-            self._notify_progress("Embeddings (OSNet Re-ID)", 72)
-            logger.info(f"Extracting OSNet Re-ID embeddings for {len(person_crops)} people crops.")
-            batch_size = 64
-            for i in range(0, len(person_crops), batch_size):
-                chunk = person_crops[i : i + batch_size]
-                imgs = []
-                valid_chunk = []
-                for item in chunk:
-                    img = cv2.imread(item["crop_path"])
-                    if img is not None:
-                        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        imgs.append(img_rgb)
-                        valid_chunk.append(item)
-                
-                if imgs:
-                    reid_embeddings = self.reid_extractor.extract_batch(imgs)
-                    for item, emb in zip(valid_chunk, reid_embeddings):
-                        reids_list.append({
-                            "track_temp_id": item["track_temp_id"],
-                            "embedding": emb,
-                            "timestamp_seconds": item["timestamp_seconds"],
-                            "crop_path": item["crop_path"],
-                            "camera_id": item["camera_id"],
-                            "confidence": item["confidence"],
-                            "bounding_box": item["bounding_box"]
-                        })
+            self._notify_progress("Embeddings Processing", 68)
+            self._flush_crops_chunk(crops_queue, clips_list, reids_list)
+            crops_queue.clear()
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

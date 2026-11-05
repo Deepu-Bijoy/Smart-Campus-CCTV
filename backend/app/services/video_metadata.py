@@ -62,3 +62,33 @@ def extract_video_metadata(file_path: str) -> Dict[str, Any]:
         logger.error(f"Error extracting video metadata for {file_path}: {str(e)}")
         
     return metadata
+
+def check_video_integrity(file_path: str) -> tuple[bool, str | None]:
+    """
+    Validates that a video file exists, is non-empty, can be opened by OpenCV,
+    and has decodable frames with positive dimensions.
+    Returns (is_valid, error_detail).
+    """
+    if not os.path.exists(file_path):
+        return False, "File was not saved properly on server disk."
+
+    if os.path.getsize(file_path) == 0:
+        return False, "Video file is empty (0 bytes)."
+
+    try:
+        cap = cv2.VideoCapture(file_path)
+        if not cap.isOpened():
+            return False, "Corrupted or invalid video stream. OpenCV could not open container."
+
+        ret, frame = cap.read()
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        cap.release()
+
+        if not ret or frame is None or width <= 0 or height <= 0:
+            return False, "Corrupted or unreadable video file. Video stream has no decodable frames."
+
+        return True, None
+    except Exception as e:
+        return False, f"Error inspecting video codec/stream: {str(e)}"
+

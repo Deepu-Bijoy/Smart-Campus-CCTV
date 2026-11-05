@@ -27,10 +27,8 @@ class YOLOv8Detector:
         """
         Runs batch inference on a list of frames.
         """
-        results = self.model(
-            frames,
-            device=self.device,
-            classes=self.target_classes,
-            verbose=False
-        )
+        kwargs = {"device": self.device, "classes": self.target_classes, "verbose": False}
+        if self.half:
+            kwargs["half"] = True
+        results = self.model(frames, **kwargs)
         return results

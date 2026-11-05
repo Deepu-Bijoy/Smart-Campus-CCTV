@@ -1,3 +1,4 @@
+import os
 import uuid
 import logging
 from datetime import datetime, timezone
@@ -534,11 +535,11 @@ async def search_identity(
     ev_res = await db.execute(ev_stmt)
     events = ev_res.scalars().all()
 
-    # 4. Group repeated detections within the same source video and camera,
-    # selecting the earliest valid detection and corresponding thumbnail evidence
+    # 4. Group detections by (video_id, effective_camera_id, track_id) so each track / detection sequence is distinct
     from app.models.camera import Camera
     from app.models.video import Video
-    from app.models.track import PersonReid, Detection, Track
+    from app.models.track import Track
+    from app.services.evidence_manager import resolve_student_track_evidence
 
     # Pre-fetch referenced videos
     video_ids = list({ev.video_id for ev in events if ev.video_id})
@@ -548,20 +549,20 @@ async def search_identity(
         for v in v_res.scalars().all():
             videos_map[v.id] = v
 
-    # Group events by (video_id, effective_camera_id)
+    # Group events by (video_id, effective_camera_id, track_id)
     groups: Dict[tuple, List[StudentRecognitionEvent]] = {}
     for ev in events:
         vid = ev.video_id
         cam_id = ev.camera_id
         if not cam_id and vid in videos_map and videos_map[vid].camera_id:
             cam_id = str(videos_map[vid].camera_id)
-        group_key = (vid, cam_id)
+        group_key = (vid, cam_id, ev.track_id)
         if group_key not in groups:
             groups[group_key] = []
         groups[group_key].append(ev)
 
     appearances = []
-    for (vid, cam_id), group_events in groups.items():
+    for (vid, cam_id, trk_id), group_events in groups.items():
         video = videos_map.get(vid)
         source_video = (video.original_filename or video.filename) if video else None
         video_url = None
@@ -587,75 +588,29 @@ async def search_identity(
             else:
                 camera_display = str(cam_id)
 
-        # Collect all tracks for this group
-        group_track_ids = list({ev.track_id for ev in group_events if ev.track_id})
+        # Fetch track
+        track_obj = None
+        if trk_id:
+            t_res = await db.execute(select(Track).filter(Track.id == trk_id))
+            track_obj = t_res.scalars().first()
 
-        reids = []
-        dets = []
-        tracks = []
-        if group_track_ids:
-            reid_stmt = (
-                select(PersonReid)
-                .filter(PersonReid.track_id.in_(group_track_ids))
-                .order_by(PersonReid.timestamp_seconds.asc())
-            )
-            reid_res = await db.execute(reid_stmt)
-            reids = reid_res.scalars().all()
-
-            det_stmt = (
-                select(Detection)
-                .filter(Detection.track_id.in_(group_track_ids))
-                .order_by(Detection.timestamp_seconds.asc())
-            )
-            det_res = await db.execute(det_stmt)
-            dets = det_res.scalars().all()
-
-            track_stmt = (
-                select(Track)
-                .filter(Track.id.in_(group_track_ids))
-                .order_by(Track.start_time.asc())
-            )
-            t_res = await db.execute(track_stmt)
-            tracks = t_res.scalars().all()
-
-        # Find earliest valid source-video detection timestamp (video-relative)
-        valid_times = []
-        if reids and reids[0].timestamp_seconds is not None:
-            valid_times.append(float(reids[0].timestamp_seconds))
-        if dets and dets[0].timestamp_seconds is not None:
-            valid_times.append(float(dets[0].timestamp_seconds))
-        if tracks and tracks[0].start_time is not None:
-            valid_times.append(float(tracks[0].start_time))
-
-        earliest_sec = min(valid_times) if valid_times else 0.0
-        time_str = _format_seconds_to_hhmmss(earliest_sec)
-
-        # Pick evidence crop corresponding to earliest detection
-        crop_url = None
-        for r in reids:
-            if r.crop_path:
-                c_url = r.crop_path.replace("\\", "/")
-                if "storage/" in c_url:
-                    crop_url = "/" + c_url[c_url.find("storage/"):]
-                else:
-                    crop_url = c_url
-                break
-
+        evidence_data = await resolve_student_track_evidence(db, video, track_obj, student, group_events)
         best_confidence = max([float(ev.similarity_score) for ev in group_events if ev.similarity_score is not None] or [0.9])
-        earliest_track_id = str(reids[0].track_id if reids else (group_events[0].track_id or uuid.uuid4()))
 
         appearances.append({
             "camera": camera_display,
             "camera_name": camera_display,
-            "timestamp": time_str,
-            "first_detection_timestamp": time_str,
-            "timestamp_seconds": float(earliest_sec),
-            "track_id": earliest_track_id,
+            "timestamp": evidence_data["timestamp"],
+            "first_detection_timestamp": evidence_data["first_detection_timestamp"],
+            "timestamp_seconds": float(evidence_data["timestamp_seconds"]),
+            "track_id": str(trk_id) if trk_id else str(uuid.uuid4()),
             "recognition_confidence": float(best_confidence),
             "video_id": str(vid) if vid else None,
             "source_video": source_video,
             "evidence": {
-                "image": crop_url,
+                "image": evidence_data["evidence_screenshot"],
+                "person_crop": evidence_data["person_crop"],
+                "is_nearby": evidence_data["is_nearby"],
                 "video": video_url
             }
         })
@@ -830,12 +785,24 @@ async def search_appearance(
         h, m = divmod(m, 60)
         time_str = f"{h:02d}:{m:02d}:{s:02d}"
 
-        source_video = (video_obj.original_filename or video_obj.filename) if video_obj else None
+        # Generate / retrieve full frame evidence if video is available
+        from app.services.evidence_manager import get_or_create_general_evidence_frame
+        full_evidence_url, is_nearby = None, False
+        if video_obj:
+            full_evidence_url, is_nearby = get_or_create_general_evidence_frame(
+                video=video_obj,
+                timestamp_seconds=offset_seconds,
+                label=f"{student_data['name']}" if student_data else "Appearance Match"
+            )
+
+        # Source video filename
+        source_video = os.path.basename(video_obj.file_path) if (video_obj and video_obj.file_path) else "Unknown Source Footage"
 
         results.append({
             "track_id": t_id,
             "camera_name": camera_display,
             "source_video": source_video,
+            "video_id": str(video_obj.id) if video_obj else None,
             "timestamp": time_str,
             "semantic_score": clip_score,
             "osnet_score": osnet_similarity,
@@ -845,7 +812,9 @@ async def search_appearance(
             "student": student_data,
             "students": [student_data] if student_data else [],
             "evidence": {
-                "image": crop_url,
+                "image": full_evidence_url or crop_url,
+                "person_crop": crop_url,
+                "is_nearby": is_nearby,
                 "video": video_url
             }
         })
@@ -937,9 +906,11 @@ async def unified_search(
             cam_str = app_item.get("camera_name") or app_item.get("camera") or "Campus Camera"
             time_display = app_item.get("timestamp") or "00:00:00"
             vid_id_str = str(app_item.get("video_id") or "")
+            trk_id_str = str(app_item.get("track_id") or "")
             
             unified_results.append({
-                "id": f"identity_{student_data['id'] if student_data else uuid.uuid4()}_{vid_id_str}_{cam_str}",
+                "id": f"identity_{student_data['id'] if student_data else uuid.uuid4()}_{vid_id_str}_{cam_str}_{trk_id_str}",
+                "track_id": trk_id_str,
                 "title": f"Student Identified — {std_name}",
                 "incident_type": "Student Identified",
                 "severity": "Low",

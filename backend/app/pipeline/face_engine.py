@@ -42,7 +42,7 @@ class FaceEnrollmentEngine:
             if crop.size == 0:
                 return 0.0
             gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-            return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+            return float(cv2.Laplacian(gray, cv2.CV_32F).var())
         except Exception as e:
             logger.error(f"Failed to calculate blur score: {str(e)}")
             return 0.0
