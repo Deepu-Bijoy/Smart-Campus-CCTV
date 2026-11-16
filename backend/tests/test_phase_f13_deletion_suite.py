@@ -251,9 +251,9 @@ async def run_phase_f13_tests():
     # 5. CLEANUP REMAINING DISPOSABLE TEST DATA
     # -------------------------------------------------------------
     async with SessionLocal() as db:
-        await db.execute(text("DELETE FROM videos WHERE id = :vid").bindparams(vid=str(video_unrelated_id)))
-        await db.execute(text("DELETE FROM students WHERE id = :sid").bindparams(sid=str(student_b_id)))
-        await db.execute(text("DELETE FROM cameras WHERE id = :cid").bindparams(cid=str(cam_id)))
+        await db.execute(text("DELETE FROM videos WHERE id = :vid").bindparams(vid=video_unrelated_id))
+        await db.execute(text("DELETE FROM students WHERE id = :sid").bindparams(sid=student_b_id))
+        await db.execute(text("DELETE FROM cameras WHERE id = :cid").bindparams(cid=cam_id))
         await db.commit()
     print("[5/5] Disposable test records cleaned up cleanly.")
 

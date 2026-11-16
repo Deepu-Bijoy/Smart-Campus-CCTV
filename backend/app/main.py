@@ -449,63 +449,65 @@ async def startup_event():
                 pass
 
         print("SQLite fallback tables initialized successfully.")
+    else:
+        print(f"PostgreSQL active database configured: {settings.POSTGRES_DB} on {settings.POSTGRES_SERVER}:{settings.POSTGRES_PORT}")
 
-        # Sync database face embeddings to Qdrant
+    # Sync database face embeddings to Qdrant
+    try:
+        from app.services.vector_store import QdrantVectorStore
+        qdrant_store = QdrantVectorStore()
+        
+        # Create Qdrant Payload indexes
         try:
-            from app.services.vector_store import QdrantVectorStore
-            qdrant_store = QdrantVectorStore()
+            from qdrant_client.http.models import PayloadSchemaType
+            for collection in ["cctv_embeddings", "student_face_embeddings"]:
+                for field in ["camera_id", "video_id", "track_id", "object_class", "student_id", "event_type", "timestamp"]:
+                    try:
+                        qdrant_store.client.create_payload_index(
+                            collection_name=collection,
+                            field_name=field,
+                            field_schema=PayloadSchemaType.KEYWORD
+                        )
+                    except Exception:
+                        pass
+            print("Qdrant payload indexes optimized successfully.")
+        except Exception:
+            pass
             
-            # Create Qdrant Payload indexes
-            try:
-                from qdrant_client.http.models import PayloadSchemaType
-                for collection in ["cctv_embeddings", "student_face_embeddings"]:
-                    for field in ["camera_id", "video_id", "track_id", "object_class", "student_id", "event_type", "timestamp"]:
-                        try:
-                            qdrant_store.client.create_payload_index(
-                                collection_name=collection,
-                                field_name=field,
-                                field_schema=PayloadSchemaType.KEYWORD
-                            )
-                        except Exception:
-                            pass
-                print("Qdrant payload indexes optimized successfully.")
-            except Exception:
-                pass
+        if settings.QDRANT_IN_MEMORY:
+            print("Syncing database face embeddings to in-memory Qdrant...")
+            from sqlalchemy.future import select
+            from app.models.face_embedding import StudentFaceEmbedding
+            from app.models.student import Student
+            from app.db.session import SessionLocal
+            
+            async with SessionLocal() as db_session:
+                stmt = select(StudentFaceEmbedding)
+                res = await db_session.execute(stmt)
+                embeddings = res.scalars().all()
                 
-            if settings.QDRANT_IN_MEMORY:
-                print("Syncing database face embeddings to in-memory Qdrant...")
-                from sqlalchemy.future import select
-                from app.models.face_embedding import StudentFaceEmbedding
-                from app.models.student import Student
-                from app.db.session import SessionLocal
-                
-                async with SessionLocal() as db_session:
-                    stmt = select(StudentFaceEmbedding)
-                    res = await db_session.execute(stmt)
-                    embeddings = res.scalars().all()
-                    
-                    if embeddings:
-                        for emb in embeddings:
-                            std_res = await db_session.execute(select(Student).filter(Student.id == emb.student_id))
-                            student = std_res.scalars().first()
-                            
-                            payload = {
-                                "student_id": str(emb.student_id),
-                                "photo_id": str(emb.photo_id),
-                                "quality": emb.quality_score,
-                                "department": student.department if student else "Unknown",
-                                "year": student.year if student else 0
-                            }
-                            qdrant_store.upsert_face_embedding(
-                                embedding_id=emb.id,
-                                vector=emb.embedding,
-                                payload=payload
-                            )
-                        print(f"Successfully synced {len(embeddings)} face embeddings to in-memory Qdrant.")
-                    else:
-                        print("No face embeddings in database to sync.")
-        except Exception as e:
-            print(f"Warning: face embeddings synchronization to Qdrant failed: {str(e)}")
+                if embeddings:
+                    for emb in embeddings:
+                        std_res = await db_session.execute(select(Student).filter(Student.id == emb.student_id))
+                        student = std_res.scalars().first()
+                        
+                        payload = {
+                            "student_id": str(emb.student_id),
+                            "photo_id": str(emb.photo_id),
+                            "quality": emb.quality_score,
+                            "department": student.department if student else "Unknown",
+                            "year": student.year if student else 0
+                        }
+                        qdrant_store.upsert_face_embedding(
+                            embedding_id=emb.id,
+                            vector=emb.embedding,
+                            payload=payload
+                        )
+                    print(f"Successfully synced {len(embeddings)} face embeddings to in-memory Qdrant.")
+                else:
+                    print("No face embeddings in database to sync.")
+    except Exception as e:
+        print(f"Warning: face embeddings synchronization to Qdrant failed: {str(e)}")
 
     print("--- REGISTERED ROUTES ---")
     for route in app.routes:

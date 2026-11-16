@@ -220,32 +220,33 @@ async def delete_student(
         )
 
     # Relational cleanups before removing student record
+    target_sid = student.id if isinstance(student.id, uuid.UUID) else uuid.UUID(str(student.id))
     await db.execute(
-        text("DELETE FROM student_recognition_events WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM student_recognition_events WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("DELETE FROM student_face_embeddings WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM student_face_embeddings WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("UPDATE tracks SET identified_student_id = NULL WHERE identified_student_id = :sid OR identified_student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("UPDATE tracks SET identified_student_id = NULL WHERE identified_student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("UPDATE events SET student_id = NULL WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("UPDATE events SET student_id = NULL WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("UPDATE reports SET student_id = NULL WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("UPDATE reports SET student_id = NULL WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("DELETE FROM incident_persons WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM incident_persons WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("DELETE FROM student_photos WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM student_photos WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("DELETE FROM student_face_sessions WHERE student_id = :sid OR student_id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM student_face_sessions WHERE student_id = :sid").bindparams(sid=target_sid)
     )
     await db.execute(
-        text("DELETE FROM students WHERE id = :sid OR id = :sid_hex").bindparams(sid=id_str, sid_hex=id_hex)
+        text("DELETE FROM students WHERE id = :sid").bindparams(sid=target_sid)
     )
 
     await db.commit()

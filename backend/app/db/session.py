@@ -17,11 +17,13 @@ db_uri = settings.SQLALCHEMY_DATABASE_URI
 if "sqlite" in db_uri:
     os.makedirs(settings.STORAGE_DIR, exist_ok=True)
 
+from sqlalchemy.pool import NullPool
+
 engine = create_async_engine(
     db_uri,
     echo=False,
     future=True,
-    **(dict(pool_pre_ping=True) if "sqlite" not in db_uri else {})
+    poolclass=NullPool
 )
 
 if "sqlite" in db_uri:
@@ -36,6 +38,24 @@ if "sqlite" in db_uri:
 
 SessionLocal = async_sessionmaker(
     bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+from sqlalchemy.pool import NullPool
+
+# Celery / Thread-safe SessionLocal using NullPool to prevent event-loop clashes
+worker_engine = create_async_engine(
+    db_uri,
+    echo=False,
+    future=True,
+    poolclass=NullPool
+)
+
+WorkerSessionLocal = async_sessionmaker(
+    bind=worker_engine,
     class_=AsyncSession,
     expire_on_commit=False,
     autocommit=False,

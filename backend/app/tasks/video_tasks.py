@@ -16,7 +16,7 @@ except ImportError:
 
 from sqlalchemy.future import select
 
-from app.db.session import SessionLocal
+from app.db.session import WorkerSessionLocal as SessionLocal
 from app.models.video import Video
 from app.pipeline.orchestrator import VideoProcessingOrchestrator
 

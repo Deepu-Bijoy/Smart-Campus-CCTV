@@ -6,17 +6,29 @@ import json
 
 import sqlalchemy
 import sqlalchemy.types
-from sqlalchemy.types import TypeDecorator, JSON, ARRAY
+from sqlalchemy.types import TypeDecorator, JSON, ARRAY, Float
 
 class SqliteCompatibleArray(TypeDecorator):
     impl = ARRAY
     cache_ok = True
 
+    def __init__(self, item_type=None, as_tuple=False, dimensions=None, zero_indexes=False, *args, **kwargs):
+        if isinstance(item_type, type):
+            item_type = item_type()
+        self.item_type = item_type if item_type is not None else Float()
+        self.as_tuple = as_tuple
+        self.dimensions = dimensions
+        self.zero_indexes = zero_indexes
+        super().__init__(self.item_type, as_tuple=as_tuple, dimensions=dimensions, zero_indexes=zero_indexes, *args, **kwargs)
+
     def load_dialect_impl(self, dialect):
         if dialect.name == "sqlite":
             return dialect.type_descriptor(JSON())
+        elif dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
+            return dialect.type_descriptor(PG_ARRAY(self.item_type, as_tuple=self.as_tuple, dimensions=self.dimensions, zero_indexes=self.zero_indexes))
         else:
-            return dialect.type_descriptor(self.impl_instance)
+            return dialect.type_descriptor(ARRAY(self.item_type, as_tuple=self.as_tuple, dimensions=self.dimensions, zero_indexes=self.zero_indexes))
 
     def process_bind_param(self, value, dialect):
         return value
@@ -79,9 +91,17 @@ def parse_cors_origins(v: Union[str, List[str]]) -> List[str]:
         return json.loads(v) if isinstance(v, str) else v
     raise ValueError(v)
 
+import os as _os
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", env_ignore_empty=True, extra="ignore"
+        env_file=(
+            ".env",
+            "backend/.env",
+            _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__))), ".env"),
+        ),
+        env_ignore_empty=True,
+        extra="ignore"
     )
 
     API_V1_STR: str = "/api/v1"
@@ -217,6 +237,23 @@ class Settings(BaseSettings):
     # Face Identification Thresholds
     RECOGNITION_HIGH_THRESHOLD: float = 0.75
     RECOGNITION_MEDIUM_THRESHOLD: float = 0.60
+    FACE_AMBIGUITY_MARGIN: float = 0.05
+
+    # Small-Face Detection & Recognition Configurations
+    FACE_DETECTION_SIZES: List[int] = [640, 960, 1280]
+    FACE_ADAPTIVE_SCALING: bool = True
+    FACE_CONF_THRESHOLD: float = 0.35
+    FACE_MIN_SIZE_PIXELS: int = 12
+    FACE_NMS_IOU_THRESHOLD: float = 0.45
+    FACE_HEAD_RATIO: float = 0.38
+    FACE_HEAD_PADDING_RATIO: float = 0.15
+    FACE_TILE_SIZE: int = 640
+    FACE_TILE_OVERLAP: float = 0.20
+    FACE_OBSERVATION_POOL_CAPACITY: int = 6
+    FACE_OBSERVATION_MIN_FRAME_GAP: int = 6
+    FACE_BLUR_MIN_THRESHOLD: float = 10.0
+    FACE_BLUR_SHARP_THRESHOLD: float = 50.0
+    FACE_MIN_QUALITY_GATE: float = 0.20
     
     # Upload Limits (Default 5 GiB = 5,368,709,120 bytes, configurable via MAX_UPLOAD_SIZE_BYTES)
     MAX_UPLOAD_SIZE_BYTES: int = Field(default=5_368_709_120, validation_alias="MAX_UPLOAD_SIZE_BYTES")

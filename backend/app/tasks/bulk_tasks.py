@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from celery import shared_task
 from sqlalchemy import select
 
-from app.db.session import SessionLocal
+from app.db.session import WorkerSessionLocal as SessionLocal
 from app.models.bulk_import import BulkImportJob
 from app.models.student import Student, StudentPhoto, StudentFaceSession
 from app.models.face_embedding import StudentFaceEmbedding

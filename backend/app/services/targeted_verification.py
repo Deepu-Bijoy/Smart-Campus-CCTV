@@ -512,9 +512,14 @@ async def perform_targeted_fight_verification(
     violence_intervals: List[Dict[str, Any]] = []
     max_conf = 0.0
     for s in violence_segments:
-        st = float(getattr(s, "start_time", 0.0) if hasattr(s, "start_time") else s.get("start_time", 0.0))
-        et = float(getattr(s, "end_time", 0.0) if hasattr(s, "end_time") else s.get("end_time", 0.0))
-        c = float(getattr(s, "confidence", 0.0) if hasattr(s, "confidence") else s.get("confidence", 0.0))
+        if isinstance(s, dict):
+            st = float(s.get("start_time", 0.0))
+            et = float(s.get("end_time", 0.0))
+            c = float(s.get("confidence", 0.0))
+        else:
+            st = float(getattr(s, "start_time", 0.0))
+            et = float(getattr(s, "end_time", 0.0))
+            c = float(getattr(s, "confidence", 0.0))
         if c > max_conf:
             max_conf = c
         violence_intervals.append({

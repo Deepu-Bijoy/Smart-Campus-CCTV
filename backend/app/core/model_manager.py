@@ -86,22 +86,49 @@ class AIModelManager:
         if self._dll_dir_handle is not None:
             return  # Already registered
 
-        if torch is None or not hasattr(torch, "__file__") or not torch.__file__:
-            logger.warning("PyTorch not found or has no __file__; cannot register PyTorch lib directory for ONNX CUDA.")
-            return
-
         try:
-            torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
-            if os.path.isdir(torch_lib):
+            import ctypes
+            dll_dirs_to_add = []
+            
+            # 1. NVIDIA CUDA runtime package (contains latest cudart64_12.dll with full symbol support)
+            nvidia_bin = os.path.join(sys.prefix, "Lib", "site-packages", "nvidia", "cuda_runtime", "bin")
+            if os.path.isdir(nvidia_bin):
+                dll_dirs_to_add.append(nvidia_bin)
+                # Preload cudart from nvidia_bin to ensure newer symbol version is active
+                nvidia_cudart = os.path.join(nvidia_bin, "cudart64_12.dll")
+                if os.path.exists(nvidia_cudart):
+                    try:
+                        ctypes.CDLL(nvidia_cudart)
+                    except Exception as ce:
+                        logger.debug("Failed preloading nvidia cudart64_12.dll: %s", ce)
+
+            # 2. PyTorch lib directory (contains cublas64_12.dll, cudnn64_9.dll, etc.)
+            if torch is not None and hasattr(torch, "__file__") and torch.__file__:
+                torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+                if os.path.isdir(torch_lib):
+                    dll_dirs_to_add.append(torch_lib)
+
+            # 3. ONNX Runtime capi directory
+            capi_dir = os.path.join(sys.prefix, "Lib", "site-packages", "onnxruntime", "capi")
+            if os.path.isdir(capi_dir):
+                dll_dirs_to_add.append(capi_dir)
+
+            for d in dll_dirs_to_add:
                 if hasattr(os, "add_dll_directory"):
-                    self._dll_dir_handle = os.add_dll_directory(torch_lib)
-                    logger.info("Successfully registered PyTorch DLL directory for ONNX CUDA: %s", torch_lib)
-                else:
-                    logger.warning("os.add_dll_directory is not available on this platform.")
-            else:
-                logger.warning("PyTorch lib directory does not exist: %s", torch_lib)
+                    try:
+                        os.add_dll_directory(d)
+                    except Exception as de:
+                        logger.debug("add_dll_directory failed for %s: %s", d, de)
+
+            # Update PATH for native Windows C++ loader fallback
+            existing_path = os.environ.get("PATH", "")
+            prepend_path = os.pathsep.join(dll_dirs_to_add)
+            os.environ["PATH"] = prepend_path + os.pathsep + existing_path
+
+            self._dll_dir_handle = True
+            logger.info("Successfully registered CUDA/cuDNN DLL directories for ONNX CUDA: %s", dll_dirs_to_add)
         except Exception as e:
-            logger.error("Failed to register PyTorch DLL directory for ONNX CUDA: %s", e)
+            logger.error("Failed to register CUDA DLL directories for ONNX CUDA: %s", e)
 
     def get_yolo(self, model_name: str = "yolov8n.pt"):
         if _YOLO is None:
@@ -176,8 +203,12 @@ class AIModelManager:
                     if self.device == "cuda":
                         self._ensure_windows_cuda_dlls()
 
-                    logger.info(f"Loading InsightFace FaceAnalysis '{model_name}'...")
-                    app = _FaceAnalysis(name=model_name, root="storage/models/insightface")
+                    logger.info(f"Loading lean InsightFace FaceAnalysis '{model_name}' (detection + recognition)...")
+                    app = _FaceAnalysis(
+                        name=model_name,
+                        root="storage/models/insightface",
+                        allowed_modules=["detection", "recognition"]
+                    )
                     
                     if self.device == "cuda":
                         try:

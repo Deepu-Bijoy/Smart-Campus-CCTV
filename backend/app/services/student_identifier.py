@@ -160,9 +160,10 @@ class StudentIdentifier:
                 print()
                 return None
 
-            # Ambiguity Rejection: If two distinct enrolled students are within 0.05 of each other, reject
+            # Ambiguity Rejection: If two distinct enrolled students are within configured margin of each other, reject
+            amb_margin = getattr(settings, "FACE_AMBIGUITY_MARGIN", 0.05)
             if second_student_id and str(second_student_id) != str(student_id) and second_similarity >= settings.RECOGNITION_MEDIUM_THRESHOLD:
-                if (highest_similarity - second_similarity) < 0.05:
+                if (highest_similarity - second_similarity) < amb_margin:
                     print("Accepted or rejected: Rejected")
                     print(f"Reason: Ambiguous match between student {student_id} ({highest_similarity:.4f}) and {second_student_id} ({second_similarity:.4f})")
                     print()

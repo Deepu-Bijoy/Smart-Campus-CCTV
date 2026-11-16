@@ -505,47 +505,47 @@ async def delete_video(
                     if ef and os.path.exists(ef):
                         files_to_remove.add(ef)
 
-        vid_hex = video.id.hex if hasattr(video.id, "hex") else vid_str.replace("-", "")
+        target_vid = video.id if isinstance(video.id, uuid.UUID) else uuid.UUID(str(video.id))
         # A. event_tracks for tracks of this video or events of this video
         await db.execute(
             text("""DELETE FROM event_tracks 
-                    WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid OR video_id = :vid_hex)
-                       OR event_id IN (SELECT id FROM events WHERE video_id = :vid OR video_id = :vid_hex)""").bindparams(vid=vid_str, vid_hex=vid_hex)
+                    WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid)
+                       OR event_id IN (SELECT id FROM events WHERE video_id = :vid)""").bindparams(vid=target_vid)
         )
         # B. events for this video
         await db.execute(
-            text("DELETE FROM events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM events WHERE video_id = :vid").bindparams(vid=target_vid)
         )
         # C. student_recognition_events for this video
         await db.execute(
-            text("DELETE FROM student_recognition_events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM student_recognition_events WHERE video_id = :vid").bindparams(vid=target_vid)
         )
         # D. person_reids for this video
         await db.execute(
-            text("DELETE FROM person_reids WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM person_reids WHERE video_id = :vid").bindparams(vid=target_vid)
         )
         # E. detections for tracks of this video
         await db.execute(
-            text("DELETE FROM detections WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid OR video_id = :vid_hex)").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM detections WHERE track_id IN (SELECT id FROM tracks WHERE video_id = :vid)").bindparams(vid=target_vid)
         )
         # F. tracks for this video
         await db.execute(
-            text("DELETE FROM tracks WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM tracks WHERE video_id = :vid").bindparams(vid=target_vid)
         )
         # G. detected_events for this video
         await db.execute(
-            text("DELETE FROM detected_events WHERE video_id = :vid OR video_id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex)
+            text("DELETE FROM detected_events WHERE video_id = :vid").bindparams(vid=target_vid)
         )
         # H. Orphaned incidents
         for inc_id in incidents_to_delete:
-            i_str = str(inc_id)
-            await db.execute(text("UPDATE reports SET incident_id = NULL WHERE incident_id = :iid").bindparams(iid=i_str))
-            await db.execute(text("DELETE FROM evidences WHERE incident_id = :iid").bindparams(iid=i_str))
-            await db.execute(text("DELETE FROM incident_persons WHERE incident_id = :iid").bindparams(iid=i_str))
-            await db.execute(text("DELETE FROM incidents WHERE id = :iid").bindparams(iid=i_str))
+            target_iid = inc_id if isinstance(inc_id, uuid.UUID) else uuid.UUID(str(inc_id))
+            await db.execute(text("UPDATE reports SET incident_id = NULL WHERE incident_id = :iid").bindparams(iid=target_iid))
+            await db.execute(text("DELETE FROM evidences WHERE incident_id = :iid").bindparams(iid=target_iid))
+            await db.execute(text("DELETE FROM incident_persons WHERE incident_id = :iid").bindparams(iid=target_iid))
+            await db.execute(text("DELETE FROM incidents WHERE id = :iid").bindparams(iid=target_iid))
 
         # I. Delete video record itself
-        await db.execute(text("DELETE FROM videos WHERE id = :vid OR id = :vid_hex").bindparams(vid=vid_str, vid_hex=vid_hex))
+        await db.execute(text("DELETE FROM videos WHERE id = :vid").bindparams(vid=target_vid))
 
         # 5. Delete vectors from Qdrant
         try:

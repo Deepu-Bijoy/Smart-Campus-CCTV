@@ -242,8 +242,8 @@ async def run_profiling():
         await db.commit()
 
         # Clean up test records
-        await db.execute(text("DELETE FROM detected_events WHERE video_id = :vid").bindparams(vid=str(test_video_id)))
-        await db.execute(text("DELETE FROM videos WHERE id = :vid").bindparams(vid=str(test_video_id)))
+        await db.execute(text("DELETE FROM detected_events WHERE video_id = :vid").bindparams(vid=test_video_id))
+        await db.execute(text("DELETE FROM videos WHERE id = :vid").bindparams(vid=test_video_id))
         await db.commit()
 
     t_db_total = time.time() - t_db_start
